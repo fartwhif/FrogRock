@@ -1,0 +1,21 @@
+{
+  "name": "frogrock",
+  "version": "2.0.0",
+  "description": "Broadcast-mode FrogRock server (TypeScript)",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "dev": "ts-node server.ts",
+    "serve": "./serve.sh",
+    "test": "./test.sh",
+    "clean": "rm -rf dist server.pid frogrock.log /tmp/test-stream.mp3"
+  },
+  "keywords": ["radio", "streaming", "broadcast", "podcast", "drivepod"],
+  "author": "FrogRock",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}

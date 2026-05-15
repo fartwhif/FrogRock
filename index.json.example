@@ -1,0 +1,102 @@
+[
+  {
+    "id": "cmoyhj5oj00lan14a9vod0aaz",
+    "videoId": "KNMrXE3FbQs",
+    "channelId": "UCw2SbtOH0K9AjQTbIRI6cqA",
+    "title": "RCA AM FM Table Radio Repair And Alignment 1968",
+    "description": null,
+    "publishedAt": "2026-05-09T15:09:21.000Z",
+    "thumbnailPath": "/cache/KNMrXE3FbQs/KNMrXE3FbQs-small.webp",
+    "audioPath": "/cache/KNMrXE3FbQs/KNMrXE3FbQs.mp3",
+    "subtitlePath": null,
+    "watched": false,
+    "progress": 0,
+    "duration": 1856.8,
+    "ignored": false,
+    "createdAt": "2026-05-09T15:14:43.459Z",
+    "channel": {
+      "id": "cmnus3sxx00f1oh4a25reh3a5",
+      "channelId": "UCw2SbtOH0K9AjQTbIRI6cqA",
+      "title": "shango066",
+      "order": 363,
+      "ignoreScrapeDone": true,
+      "createdAt": "2026-04-11T20:19:55.846Z"
+    },
+    "author": "shango066"
+  },
+  {
+    "id": "cmoyh89dq00k9n14ac6ikm7mx",
+    "videoId": "njJHJCNZKjE",
+    "channelId": "UCrmCxnticISU9n6UdrLEgjw",
+    "title": "Friend, I Am Doing You No Wrong - James Jennings",
+    "description": null,
+    "publishedAt": "2026-05-09T15:01:15.000Z",
+    "thumbnailPath": "/cache/njJHJCNZKjE/njJHJCNZKjE-small.webp",
+    "audioPath": "/cache/njJHJCNZKjE/njJHJCNZKjE.mp3",
+    "subtitlePath": null,
+    "watched": false,
+    "progress": 0,
+    "duration": 2418.1,
+    "ignored": false,
+    "createdAt": "2026-05-09T15:06:15.038Z",
+    "channel": {
+      "id": "cmnus35tl00e5oh4anaz1q71w",
+      "channelId": "UCrmCxnticISU9n6UdrLEgjw",
+      "title": "Grace Community Church",
+      "order": 331,
+      "ignoreScrapeDone": true,
+      "createdAt": "2026-04-11T20:19:25.882Z"
+    },
+    "author": "Grace Community Church"
+  },
+  {
+    "id": "cmoyd3gf800esn14a39wautj7",
+    "videoId": "m3YsbA9sgXE",
+    "channelId": "UCGsDIP_K6J6VSTqlq-9IPlg",
+    "title": "How Old Men in Christ Avoid Regret",
+    "description": null,
+    "publishedAt": "2026-05-09T13:01:57.000Z",
+    "thumbnailPath": "/cache/m3YsbA9sgXE/m3YsbA9sgXE-small.webp",
+    "audioPath": "/cache/m3YsbA9sgXE/m3YsbA9sgXE.mp3",
+    "subtitlePath": null,
+    "watched": false,
+    "progress": 0,
+    "duration": 1397.2,
+    "ignored": false,
+    "createdAt": "2026-05-09T13:10:32.420Z",
+    "channel": {
+      "id": "cmnury6xo006xoh4a8s3yvl13",
+      "channelId": "UCGsDIP_K6J6VSTqlq-9IPlg",
+      "title": "Paul VanderKlay",
+      "order": 98,
+      "ignoreScrapeDone": true,
+      "createdAt": "2026-04-11T20:15:34.044Z"
+    },
+    "author": "Paul VanderKlay"
+  },
+  {
+    "id": "cmoycuwcx00enn14aukoorvhl",
+    "videoId": "I2OsvSc8VeE",
+    "channelId": "UChIs72whgZI9w6d6FhwGGHA",
+    "title": "We Hacked & Overclocked a PS5 to Install Linux and Steam",
+    "description": null,
+    "publishedAt": "2026-05-09T12:58:12.000Z",
+    "thumbnailPath": "/cache/I2OsvSc8VeE/I2OsvSc8VeE-small.webp",
+    "audioPath": "/cache/I2OsvSc8VeE/I2OsvSc8VeE.mp3",
+    "subtitlePath": null,
+    "watched": true,
+    "progress": 1722,
+    "duration": 1722.4,
+    "ignored": false,
+    "createdAt": "2026-05-09T13:03:53.170Z",
+    "channel": {
+      "id": "cmnus1uw600ccoh4arjtlpvuh",
+      "channelId": "UChIs72whgZI9w6d6FhwGGHA",
+      "title": "Gamers Nexus",
+      "order": 267,
+      "ignoreScrapeDone": true,
+      "createdAt": "2026-04-11T20:18:25.062Z"
+    },
+    "author": "Gamers Nexus"
+  }
+]
