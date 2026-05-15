@@ -23,7 +23,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-rm -f "$LOG_FILE" "$TEST_STREAM" 2>/dev/null || true
+rm -f "$LOG_FILE" "$TEST_STREAM" /tmp/headers.txt 2>/dev/null || true
 
 echo "Starting server using serve.sh..."
 ./serve.sh --force
@@ -40,8 +40,13 @@ done
 sleep 2
 
 echo -e "\n=== 1. ICY Headers (broadcast mode) ==="
-echo "Running your exact command:"
-curl -s -D - --max-time 12 --no-keepalive "http://localhost:$PORT/stream.mp3"
+
+curl -s -D - --max-time 1 --no-keepalive "http://localhost:$PORT/stream.mp3" -o /dev/null | tee /tmp/headers.txt
+if grep -qE '^(HTTP|icy-|Content-Type:|icy-name|icy-br)' /tmp/headers.txt; then
+    echo "✅ ICY headers look good"
+else
+    echo "⚠️  Headers missing — see above"
+fi
 
 echo -e "\n=== 2. Stream validation (ffmpeg probe) ==="
 timeout 10s ffmpeg -v error -i "http://localhost:$PORT/stream.mp3" -f null - 2>&1 || echo "⚠️ ffmpeg probe finished (normal)"
