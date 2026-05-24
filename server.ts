@@ -57,10 +57,14 @@ type StatePartial = Partial<{
 
 // ====================== CONSTANTS ======================
 const PORT = 8090;
-const CACHE_DIR = '/media/sf_projects/DrivePod/cache';
+const CACHE_DIR = process.env.CACHE_DIR || 'UNCONFIGURED';
 const INDEX_JSON_PATH = path.join(CACHE_DIR, 'index.json');
 const COMPLETED_TRACKS_PATH = path.join(CACHE_DIR, 'completed.json');
-
+// ====================== STARTUP CHECKS ======================
+if (CACHE_DIR === 'UNCONFIGURED') {
+  console.error('ERROR: CACHE_DIR environment variable is not set. Please set CACHE_DIR to the path of your cache directory.');
+  process.exit(1);
+}
 // ====================== GLOBAL IMMUTABLE STATE ======================
 let state: AppState = Object.freeze({
   playlist: Object.freeze([] as Track[]),

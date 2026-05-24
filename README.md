@@ -12,7 +12,6 @@ FrogRock is a lightweight Node.js HTTP streaming server that turns a DrivePod ca
 - **Single live broadcast** — all connected clients receive identical audio bytes at the exact same wall-clock time.
 - **Clients have zero control** over playback position. New listeners instantly join the live stream wherever it currently is (standard radio behavior).
 - **Real-time pacing** — audio is delivered at approximately the target bitrate (~128 kbps) instead of blasting entire tracks.
-- **Approved path handling** — uses the exact `/cache/` normalization pattern from AGENTS.md.
 
 ---
 
@@ -67,7 +66,6 @@ The original implementation and README contained several deep misconceptions abo
 - **Completed track tracking** — automatically skips already-played episodes
 - **Automatic playlist refresh** every 5 minutes
 - **ICY/Shoutcast compatible headers**
-- **Path normalization** using the exact approved pattern from AGENTS.md
 - **Graceful handling** of missing files and stream errors
 - **Zero client control** over playback position
 
@@ -192,7 +190,7 @@ The server monitors bytes sent vs. elapsed time and automatically pauses/resumes
 
 - Node.js 18+
 - Read access to `CACHE_DIR` (default: `/media/sf_projects/DrivePod/cache`)
-- The DrivePod cache must contain `index.json` matching the full structure in `index.json.example` (includes `audioPath`, `id`, `title`, `channel`, `author`, `thumbnailPath`, `duration`, etc.)
+- The DrivePod cache must contain `index.json` matching the full structure in `index.json.example`
 
 ---
 
