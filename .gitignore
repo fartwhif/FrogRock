@@ -2,3 +2,8 @@
 /dist
 /frogrock.log
 /server.linux.pid
+.env
+node_modules/
+dist/
+*.log
+*.pid
