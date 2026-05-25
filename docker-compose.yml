@@ -1,0 +1,10 @@
+services:
+  frogrock:
+    build: .
+    container_name: frogrock
+    env_file: .env
+    ports:
+      - "${PORT:-8090}:8090"
+    volumes:
+      - "${HOST_CACHE_DIR}:/cache:ro"
+    restart: unless-stopped

@@ -56,7 +56,7 @@ type StatePartial = Partial<{
 }>;
 
 // ====================== CONSTANTS ======================
-const PORT = 8090;
+const PORT = parseInt(process.env.PORT || '8090', 10);
 const CACHE_DIR = process.env.CACHE_DIR || 'UNCONFIGURED';
 const INDEX_JSON_PATH = path.join(CACHE_DIR, 'index.json');
 const COMPLETED_TRACKS_PATH = path.join(CACHE_DIR, 'completed.json');

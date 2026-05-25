@@ -9,7 +9,11 @@
     "dev": "ts-node server.ts",
     "serve": "./serve.sh",
     "test": "./test.sh",
-    "clean": "rm -rf dist server.pid frogrock.log /tmp/test-stream.mp3"
+    "clean": "rm -rf dist server.pid frogrock.log /tmp/test-stream.mp3",
+    "docker:build": "docker compose build",
+    "docker:up": "docker compose up -d",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f"
   },
   "keywords": ["radio", "streaming", "broadcast", "podcast", "drivepod"],
   "author": "FrogRock",
