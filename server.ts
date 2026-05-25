@@ -152,11 +152,9 @@ class MetadataInjector {
     if (this.metadata.length === 0) {
       return Buffer.from([0]);
     }
-    const encoded = Buffer.from(this.metadata, 'utf8');
-    const len = encoded.length;
-    const header = Buffer.alloc(4);
-    header.writeUInt32BE(len, 0);
-    return Buffer.concat([header, encoded]);
+    const encoded = Buffer.from(this.metadata, 'utf16le');
+    const len = encoded.length > 255 ? 255 : encoded.length;
+    return Buffer.concat([Buffer.from([len]), encoded.slice(0, len)]);
   }
 
   flush(): Buffer[] {
