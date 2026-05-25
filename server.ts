@@ -7,6 +7,7 @@
 // - Completed track skipping + auto-reset
 // - Exhaustive typing based on real DrivePod index.json.example structure
 
+import 'dotenv/config';
 import http from 'http';
 import fs from 'fs';
 import path from 'path';
@@ -192,12 +193,16 @@ function startCurrentTrack(): void {
     const chunkLength = Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(chunk as string);
     currentByteOffset += chunkLength;
 
+    const disconnected: http.ServerResponse[] = [];
     for (const res of activeClients) {
       if (res.writable && !res.writableEnded) {
         res.write(chunk);
       } else {
-        activeClients.delete(res);
+        disconnected.push(res);
       }
+    }
+    for (const res of disconnected) {
+      activeClients.delete(res);
     }
 
     const elapsedSec = (Date.now() - startTime) / 1000;
