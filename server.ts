@@ -412,6 +412,10 @@ function startCurrentTrack(): void {
   currentByteOffset = 0;
   trackStartTime = Date.now();
   currentTrackBitrate = probeBitrate(filePath);
+  if (currentTrackBitrate === 0) {
+    console.error(`FATAL: Failed to probe bitrate for ${filePath}`);
+    process.exit(1);
+  }
   currentTrackFileSize = fs.statSync(filePath).size;
 
   const displayTitle = track.title || path.basename(filePath);
@@ -429,7 +433,6 @@ function startCurrentTrack(): void {
     start: startOffset,
   });
 
-  const BITRATE_BPS = 128 * 1024;
   const startTime = Date.now();
 
   currentReadStream.on('data', (raw: Buffer | string) => {
@@ -447,7 +450,7 @@ function startCurrentTrack(): void {
     manifold.prune();
 
     const elapsedSec = (Date.now() - startTime) / 1000;
-    const expectedBytes = elapsedSec * (BITRATE_BPS / 8);
+    const expectedBytes = elapsedSec * (currentTrackBitrate / 8);
     const bufferAhead = currentByteOffset - expectedBytes;
 
     if (bufferAhead > 32768) {
