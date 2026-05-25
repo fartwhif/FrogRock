@@ -89,6 +89,43 @@ The compiled JavaScript remains fully compatible with the original runtime behav
 
 ---
 
+## Docker Deployment
+
+The fastest way to run FrogRock is with Docker Compose.
+
+### Setup
+
+```bash
+cp .env.example .env
+# Edit .env — set HOST_CACHE_DIR to your DrivePod cache path
+```
+
+### Run
+
+```bash
+docker compose up -d
+```
+
+The stream is available at `http://localhost:8090/stream.mp3`.
+
+### Commands
+
+```bash
+docker compose up -d          # Start
+docker compose down           # Stop
+docker compose logs -f        # View logs
+docker compose up -d --build  # Rebuild and restart
+```
+
+### How it works
+
+- `.env` provides `PORT`, `HOST_CACHE_DIR`, and `CACHE_DIR`
+- Your host cache directory is mounted read-only at `/cache` inside the container
+- The Dockerfile uses a multi-stage build (node:22-alpine) — final image contains only compiled JS
+- The container runs as a non-root user for security
+
+---
+
 ## Usage
 
 ### Start the server
