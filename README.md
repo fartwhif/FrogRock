@@ -240,4 +240,4 @@ The server monitors bytes sent vs. elapsed time and automatically pauses/resumes
 
 ---
 
-**FrogRock is now a correct, honest implementation of a live radio broadcaster.** No more misleading claims about time simulation or per-client control. Just reliable, synchronized streaming with immutable state.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                
+**FrogRock is now a correct, honest implementation of a live radio broadcaster.** No more misleading claims about time simulation or per-client control. Just reliable, synchronized streaming with immutable state.
