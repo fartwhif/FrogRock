@@ -4,7 +4,6 @@
 // - Single live audio source → all clients hear exactly the same thing at the same time
 // - Clients join the LIVE position (no per-client control over playback)
 // - Real-time pacing (~128 kbps)
-// - Approved /cache/ path normalization (extended to thumbnailPath & subtitlePath for full index.json.example compatibility)
 // - Completed track skipping + auto-reset
 // - Exhaustive typing based on real DrivePod index.json.example structure
 
@@ -98,31 +97,6 @@ let currentReadStream: fs.ReadStream | null = null;
 let currentTrackData: Track | null = null;
 let currentByteOffset = 0;
 
-// ====================== PATH NORMALIZATION (approved pattern + extended for full structure) ======================
-function normalizeAudioPath(item: any): any {
-  if (item && typeof item.audioPath === 'string' && item.audioPath.startsWith('/cache/')) {
-    const relativePath = item.audioPath.substring('/cache/'.length);
-    item = { ...item, audioPath: path.join(CACHE_DIR, relativePath) };
-  }
-  return item;
-}
-
-// Extended normalization for thumbnailPath and subtitlePath (same approved pattern)
-function normalizeTrackPaths(track: any): Track {
-  let normalized = normalizeAudioPath(track);
-
-  if (normalized.thumbnailPath && typeof normalized.thumbnailPath === 'string' && normalized.thumbnailPath.startsWith('/cache/')) {
-    const relative = normalized.thumbnailPath.substring('/cache/'.length);
-    normalized = { ...normalized, thumbnailPath: path.join(CACHE_DIR, relative) };
-  }
-
-  if (normalized.subtitlePath && typeof normalized.subtitlePath === 'string' && normalized.subtitlePath.startsWith('/cache/')) {
-    const relative = normalized.subtitlePath.substring('/cache/'.length);
-    normalized = { ...normalized, subtitlePath: path.join(CACHE_DIR, relative) };
-  }
-
-  return normalized as Track;
-}
 
 // ====================== PLAYLIST MANAGEMENT ======================
 function refreshPlaylist(): void {
@@ -152,7 +126,6 @@ function refreshPlaylist(): void {
     let newPlaylist: Track[] = [];
     if (Array.isArray(index)) {
       newPlaylist = index
-        .map(normalizeTrackPaths)
         .filter((item): item is Track => Boolean(item && item.audioPath));
     }
 
@@ -194,7 +167,7 @@ function startCurrentTrack(): void {
     return;
   }
 
-  const filePath = track.audioPath;
+  const filePath = path.join(CACHE_DIR, track.audioPath);
   if (!fs.existsSync(filePath)) {
     console.error(`Audio file not found: ${filePath}`);
     advanceToNextTrack();
