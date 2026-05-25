@@ -70,6 +70,10 @@ const MAX_METADATA_LEN = 255;
 const CLIENT_QUEUE_MAX_BYTES = parseInt(process.env.CLIENT_QUEUE_MAX_BYTES || '65536', 10);
 const CLIENT_LAG_MAX_MS = parseInt(process.env.CLIENT_LAG_MAX_MS || '10000', 10);
 
+// Burst buffer for new-client prebuffering (duration in seconds, resized per track)
+const BURST_DURATION_SEC = parseInt(process.env.BURST_DURATION_SEC || '8', 10);
+let burstCapacity: number = 65536;
+
 // ====================== STARTUP CHECKS ======================
 if (CACHE_DIR === 'UNCONFIGURED') {
   console.error('ERROR: CACHE_DIR environment variable is not set.');
@@ -101,6 +105,56 @@ function updateState(partial: StatePartial): void {
   };
 
   state = Object.freeze(newState);
+}
+
+// ====================== CIRCULAR BUFFER (burst backlog) ======================
+class CircularBuffer {
+  private buffer: Buffer;
+  private head: number = 0;
+  private size: number = 0;
+
+  constructor(capacity: number) {
+    this.buffer = Buffer.allocUnsafe(capacity);
+  }
+
+  push(chunk: Buffer): void {
+    let offset = 0;
+    while (offset < chunk.length) {
+      const writePos = (this.head + this.size) % this.buffer.length;
+      const remaining = this.buffer.length - writePos;
+
+      if (this.size < this.buffer.length) {
+        const toWrite = Math.min(chunk.length - offset, remaining, this.buffer.length - this.size);
+        chunk.copy(this.buffer, writePos, offset, offset + toWrite);
+        offset += toWrite;
+        this.size += toWrite;
+      } else {
+        const toWrite = Math.min(chunk.length - offset, remaining);
+        chunk.copy(this.buffer, writePos, offset, offset + toWrite);
+        this.head = (this.head + toWrite) % this.buffer.length;
+        offset += toWrite;
+      }
+    }
+  }
+
+  peek(maxBytes: number): Buffer {
+    if (this.size === 0) return Buffer.alloc(0);
+    const toRead = Math.min(maxBytes, this.size);
+    const result = Buffer.allocUnsafe(toRead);
+    let offset = 0;
+    while (offset < toRead) {
+      const readPos = (this.head + offset) % this.buffer.length;
+      const remaining = this.buffer.length - readPos;
+      const toCopy = Math.min(toRead - offset, remaining);
+      this.buffer.copy(result, offset, readPos, readPos + toCopy);
+      offset += toCopy;
+    }
+    return result;
+  }
+
+  getAvailable(): number {
+    return this.size;
+  }
 }
 
 // ====================== PER-CLIENT CONNECTION ======================
@@ -164,6 +218,14 @@ class ClientConnection {
     return ok;
   }
 
+  burstFromBuffer(buffer: CircularBuffer): void {
+    if (this.disconnected) return;
+    const data = buffer.peek(burstCapacity);
+    if (data.length > 0) {
+      this.writer.write(data);
+    }
+  }
+
   getLagMs(sourceStartTime: number): number {
     const elapsed = Date.now() - sourceStartTime;
     return elapsed;
@@ -214,6 +276,8 @@ class ClientManifold {
   }
 
   broadcastAudio(chunk: Buffer, trackTitle: string, trackAuthor: string, trackChannel: string, sourceStartTime: number): void {
+    audioBuffer.push(chunk);
+
     if (this._clients.length === 0) return;
 
     const toRemove: ClientConnection[] = [];
@@ -264,6 +328,7 @@ class ClientManifold {
 }
 
 const manifold = new ClientManifold();
+let audioBuffer = new CircularBuffer(burstCapacity);
 
 // ====================== ACTIVE STREAM STATE ======================
 let isPlaying = false;
@@ -417,6 +482,9 @@ function startCurrentTrack(): void {
   }
   currentTrackFileSize = fs.statSync(filePath).size;
 
+  burstCapacity = Math.ceil(currentTrackBitrate / 8 * BURST_DURATION_SEC);
+  audioBuffer = new CircularBuffer(burstCapacity);
+
   const displayTitle = track.title || path.basename(filePath);
   const channelInfo = track.channel?.title ? ` [${track.channel.title}]` : '';
   console.log(`▶️  Broadcasting: ${displayTitle}${channelInfo} (startOffset: ${startOffset})`);
@@ -546,6 +614,10 @@ const server = http.createServer((req: http.IncomingMessage, res: http.ServerRes
       );
     }
 
+    if (isPlaying) {
+      client.burstFromBuffer(audioBuffer);
+    }
+
     const cleanup = () => {
       manifold.remove(client);
       console.log(`Client disconnected (remaining: ${manifold.getActiveCount()})`);
@@ -567,6 +639,7 @@ const server = http.createServer((req: http.IncomingMessage, res: http.ServerRes
 server.listen(PORT, () => {
   console.log(`FrogRock BROADCAST server listening on http://localhost:${PORT}/stream.mp3`);
   console.log(`  → Per-client ICY manifold (queue max: ${CLIENT_QUEUE_MAX_BYTES}B, lag limit: ${CLIENT_LAG_MAX_MS}ms)`);
+  console.log(`  → New-client burst: ${BURST_DURATION_SEC}s of audio (resized per track bitrate)`);
   console.log(`  → Slow clients are dropped automatically`);
 
   refreshPlaylist();
