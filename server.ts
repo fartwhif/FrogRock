@@ -266,7 +266,7 @@ class ClientManifold {
 const manifold = new ClientManifold();
 
 // ====================== ACTIVE STREAM STATE ======================
-let currentReadStream: fs.ReadStream | null = null;
+let isPlaying = false;
 let currentTrackData: Track | null = null;
 let currentByteOffset = 0;
 let trackStartTime = Date.now();
@@ -348,7 +348,7 @@ function probeBitrate(filePath: string): number {
 
 // ====================== STATUS PERSISTENCE ======================
 function writeStatus(): void {
-  const status = currentReadStream ? 'playing' : 'idle';
+  const status = isPlaying ? 'playing' : 'idle';
   const elapsedMs = Date.now() - trackStartTime;
   const statusObj = {
     status,
@@ -373,9 +373,8 @@ function writeStatus(): void {
 
 // ====================== BROADCAST STREAMING ======================
 function startCurrentTrack(): void {
-  if (currentReadStream) {
-    currentReadStream.destroy();
-    currentReadStream = null;
+  if (isPlaying) {
+    isPlaying = false;
   }
 
   const trackIndex = state.currentTrackIndex;
@@ -428,42 +427,41 @@ function startCurrentTrack(): void {
     track.channel?.title ?? 'Unknown'
   );
 
-  currentReadStream = fs.createReadStream(filePath, {
-    highWaterMark: 16384,
-    start: startOffset,
-  });
+  isPlaying = true;
+  const fd = fs.openSync(filePath, 'r');
+  const contentLengthSec = currentTrackFileSize / (currentTrackBitrate / 8);
+  const streamLoop = async () => {
+    const t = Date.now();
+    let sent = 0;
 
-  const startTime = Date.now();
+    while (sent < currentTrackFileSize) {
+      const g = (Date.now() - t) / 1000;
+      const shouldHaveSent = (g / contentLengthSec) * currentTrackFileSize;
+      const behind = shouldHaveSent - sent;
 
-  currentReadStream.on('data', (raw: Buffer | string) => {
-    const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(raw as string);
-    currentByteOffset += buf.length;
+      if (behind > 0) {
+        const chunkSize = Math.min(Math.ceil(behind), 8192, currentTrackFileSize - sent);
+        const buf = Buffer.alloc(chunkSize);
+        const bytesRead = fs.readSync(fd, buf, 0, chunkSize, sent);
 
-    manifold.broadcastAudio(
-      buf,
-      track.title || path.basename(filePath),
-      track.author,
-      track.channel?.title ?? 'Unknown',
-      trackStartTime
-    );
-
-    manifold.prune();
-
-    const elapsedSec = (Date.now() - startTime) / 1000;
-    const expectedBytes = elapsedSec * (currentTrackBitrate / 8);
-    const bufferAhead = currentByteOffset - expectedBytes;
-
-    if (bufferAhead > 32768) {
-      currentReadStream?.pause();
-      setTimeout(() => {
-        if (currentReadStream && !currentReadStream.destroyed) {
-          currentReadStream.resume();
+        if (bytesRead > 0) {
+          const data = buf.slice(0, bytesRead);
+          manifold.broadcastAudio(
+            data,
+            track.title || path.basename(filePath),
+            track.author,
+            track.channel?.title ?? 'Unknown',
+            trackStartTime
+          );
+          manifold.prune();
+          sent += bytesRead;
+          currentByteOffset = sent;
         }
-      }, 150);
+      }
+      await new Promise(r => setTimeout(r, 100));
     }
-  });
 
-  currentReadStream.on('end', () => {
+    fs.closeSync(fd);
     console.log(`✓ Finished: ${track.title || path.basename(filePath)}`);
 
     const newCompleted = new Set(state.completedTracks);
@@ -472,9 +470,10 @@ function startCurrentTrack(): void {
     saveCompletedTracks();
 
     advanceToNextTrack();
-  });
+  };
 
-  currentReadStream.on('error', (err: Error) => {
+  streamLoop().catch((err: Error) => {
+    fs.closeSync(fd);
     console.error('Stream error:', err.message);
     advanceToNextTrack();
   });
@@ -554,7 +553,7 @@ const server = http.createServer((req: http.IncomingMessage, res: http.ServerRes
 
     res.on('close', cleanup);
 
-    if (!currentReadStream && state.playlist.length > 0) {
+    if (!isPlaying && state.playlist.length > 0) {
       startCurrentTrack();
     }
 
@@ -573,7 +572,7 @@ server.listen(PORT, () => {
   refreshPlaylist();
 
   setTimeout(() => {
-    if (state.playlist.length > 0 && !currentReadStream) {
+    if (state.playlist.length > 0 && !isPlaying) {
       startCurrentTrack();
     }
   }, 500);
@@ -590,7 +589,7 @@ server.on('error', (err: Error) => {
 process.on('SIGINT', () => {
   console.log('\nShutting down...');
   writeStatus();
-  if (currentReadStream) currentReadStream.destroy();
+  isPlaying = false;
   for (const client of manifold.clients) {
     client.disconnect('Server shutdown');
   }
