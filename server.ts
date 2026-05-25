@@ -12,6 +12,7 @@ import http from 'http';
 import fs from 'fs';
 import path from 'path';
 import { execFileSync } from 'child_process';
+import CodecParser, { CodecFrame } from 'codec-parser';
 import { Writer } from './src/icy-writer';
 
 // ====================== EXHAUSTIVE TYPES (from index.json.example) ======================
@@ -495,40 +496,54 @@ function startCurrentTrack(): void {
     track.channel?.title ?? 'Unknown'
   );
 
-  isPlaying = true;
+ isPlaying = true;
   const fd = fs.openSync(filePath, 'r');
-  const contentLengthSec = currentTrackFileSize / (currentTrackBitrate / 8);
+  const audioBytes = currentTrackFileSize - startOffset;
+  const contentLengthSec = audioBytes / (currentTrackBitrate / 8);
+  const parser = new CodecParser('audio/mpeg', { enableFrameCRC32: false });
   const streamLoop = async () => {
     const t = Date.now();
-    let sent = 0;
+    let sent = startOffset;
 
     while (sent < currentTrackFileSize) {
       const g = (Date.now() - t) / 1000;
-      const shouldHaveSent = (g / contentLengthSec) * currentTrackFileSize;
+      const shouldHaveSent = (g / contentLengthSec) * audioBytes + startOffset;
       const behind = shouldHaveSent - sent;
 
       if (behind > 0) {
-        const chunkSize = Math.min(Math.ceil(behind), 8192, currentTrackFileSize - sent);
-        const buf = Buffer.alloc(chunkSize);
-        const bytesRead = fs.readSync(fd, buf, 0, chunkSize, sent);
+        const readSize = Math.min(Math.ceil(behind), 8192, currentTrackFileSize - sent);
+        const buf = Buffer.alloc(readSize);
+        const bytesRead = fs.readSync(fd, buf, 0, readSize, sent);
 
         if (bytesRead > 0) {
-          const data = buf.slice(0, bytesRead);
-          manifold.broadcastAudio(
-            data,
-            track.title || path.basename(filePath),
-            track.author,
-            track.channel?.title ?? 'Unknown',
-            trackStartTime
-          );
-          manifold.prune();
           sent += bytesRead;
           currentByteOffset = sent;
+          const frames = [...parser.parseChunk(buf.slice(0, bytesRead)) as unknown as Generator<CodecFrame>];
+          for (const frame of frames) {
+            manifold.broadcastAudio(
+              Buffer.from(frame.data),
+              track.title || path.basename(filePath),
+              track.author,
+              track.channel?.title ?? 'Unknown',
+              trackStartTime
+            );
+          }
+          manifold.prune();
         }
       }
       await new Promise(r => setTimeout(r, 100));
     }
 
+    for (const frame of parser.flush() as unknown as Generator<CodecFrame>) {
+      manifold.broadcastAudio(
+        Buffer.from(frame.data),
+        track.title || path.basename(filePath),
+        track.author,
+        track.channel?.title ?? 'Unknown',
+        trackStartTime
+      );
+    }
+    manifold.prune();
     fs.closeSync(fd);
     console.log(`✓ Finished: ${track.title || path.basename(filePath)}`);
 
@@ -595,10 +610,11 @@ const server = http.createServer((req: http.IncomingMessage, res: http.ServerRes
       'icy-description': 'DrivePod Radio Stream (Live)',
       'icy-genre': 'Podcast',
       'icy-pub': '1',
-      'icy-br': '128',
+      'icy-br': String(currentTrackBitrate ? Math.round(currentTrackBitrate / 1000) : 128),
       'icy-metaint': String(METAIMNT),
       'Cache-Control': 'no-cache, no-store, must-revalidate',
-      'Connection': 'keep-alive',
+      'Connection': 'close',
+       'Transfer-Encoding': 'identity',
       'Pragma': 'no-cache',
       'Expires': '0',
     });
