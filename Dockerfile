@@ -3,6 +3,8 @@ FROM node:22-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json tsconfig.json ./
 RUN npm ci --no-audit --no-fund
+COPY types/ ./types/
+COPY src/ ./src/
 COPY server.ts ./
 RUN npx tsc --skipLibCheck
 

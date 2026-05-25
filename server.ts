@@ -1,16 +1,17 @@
 // server.ts
-// Broadcast-mode FrogRock server with:
+// Broadcast-mode FrogRock server with per-client ICY manifold:
+// - Each client gets its own icy.Writer for metadata injection
+// - Per-client queue with configurable size limit
+// - Slow clients dropped when queue overflows or lag exceeds threshold
 // - Global IMMUTABLE state (updates create new objects/Sets)
-// - Single live audio source → all clients hear exactly the same thing at the same time
-// - Clients join the LIVE position (no per-client control over playback)
+// - Single live audio source → all clients hear the same content
 // - Real-time pacing (~128 kbps)
-// - Completed track skipping + auto-reset
-// - Exhaustive typing based on real DrivePod index.json.example structure
 
 import 'dotenv/config';
 import http from 'http';
 import fs from 'fs';
 import path from 'path';
+import { Writer } from './src/icy-writer';
 
 // ====================== EXHAUSTIVE TYPES (from index.json.example) ======================
 interface Channel {
@@ -60,11 +61,19 @@ const PORT = parseInt(process.env.PORT || '8090', 10);
 const CACHE_DIR = process.env.CACHE_DIR || 'UNCONFIGURED';
 const INDEX_JSON_PATH = path.join(CACHE_DIR, 'index.json');
 const COMPLETED_TRACKS_PATH = path.join(CACHE_DIR, 'completed.json');
+const METAIMNT = 16000;
+const MAX_METADATA_LEN = 255;
+
+// Per-client queue settings (Icecast-style backpressure)
+const CLIENT_QUEUE_MAX_BYTES = parseInt(process.env.CLIENT_QUEUE_MAX_BYTES || '65536', 10);
+const CLIENT_LAG_MAX_MS = parseInt(process.env.CLIENT_LAG_MAX_MS || '10000', 10);
+
 // ====================== STARTUP CHECKS ======================
 if (CACHE_DIR === 'UNCONFIGURED') {
-  console.error('ERROR: CACHE_DIR environment variable is not set. Please set CACHE_DIR to the path of your cache directory.');
+  console.error('ERROR: CACHE_DIR environment variable is not set.');
   process.exit(1);
 }
+
 // ====================== GLOBAL IMMUTABLE STATE ======================
 let state: AppState = Object.freeze({
   playlist: Object.freeze([] as Track[]),
@@ -92,85 +101,173 @@ function updateState(partial: StatePartial): void {
   state = Object.freeze(newState);
 }
 
-// ====================== ACTIVE CLIENTS (broadcast) ======================
-const activeClients = new Set<http.ServerResponse>();
-let currentReadStream: fs.ReadStream | null = null;
-let currentTrackData: Track | null = null;
-let currentByteOffset = 0;
+// ====================== PER-CLIENT CONNECTION ======================
+class ClientConnection {
+  public res: http.ServerResponse;
+  public writer: Writer;
+  private queueBytes: number = 0;
+  private lastDataTime: number = Date.now();
+  private disconnected: boolean = false;
 
-// ====================== ICY METADATA INJECTOR ======================
-const METAIMNT = 16000;
-const MAX_METADATA_LEN = 255;
+  constructor(res: http.ServerResponse) {
+    this.res = res;
+    this.writer = new Writer(METAIMNT, {
+      highWaterMark: 32768,
+    });
 
-class MetadataInjector {
-  private buffer: Buffer = Buffer.alloc(0);
-  private bytesSinceMeta: number = 0;
-  private metadata: string = '';
+    this.writer.on('drain', () => {
+      this.queueBytes = 0;
+    });
 
-  setMetadata(title: string, artist: string, channel: string): void {
+    this.writer.on('error', (err: Error) => {
+      if (!this.disconnected) {
+        console.log(`Client writer error: ${err.message}`);
+        this.disconnect('Writer error');
+      }
+    });
+
+    this.writer.pipe(res, { end: false });
+  }
+
+  formatMetadata(title: string, artist: string, channel: string): string {
     const raw = `${title} - ${artist} [${channel}]`;
-    this.metadata = raw.length > MAX_METADATA_LEN ? raw.slice(0, MAX_METADATA_LEN) : raw;
+    return raw.length > MAX_METADATA_LEN ? raw.slice(0, MAX_METADATA_LEN) : raw;
   }
 
-  push(chunk: Buffer): Buffer[] {
-    this.buffer = Buffer.concat([this.buffer, chunk]);
-    const output: Buffer[] = [];
-    let offset = 0;
-
-    while (offset < this.buffer.length) {
-      const remaining = this.buffer.length - offset;
-      const distToMeta = METAIMNT - this.bytesSinceMeta;
-
-      if (distToMeta <= 0) {
-        output.push(this.createMetadataBlock());
-        this.bytesSinceMeta = 0;
-        continue;
-      }
-
-      if (remaining <= distToMeta) {
-        output.push(this.buffer.slice(offset));
-        this.bytesSinceMeta += remaining;
-        offset = this.buffer.length;
-      } else {
-        output.push(this.buffer.slice(offset, offset + distToMeta));
-        offset += distToMeta;
-        this.bytesSinceMeta = METAIMNT;
-      }
+  queueMetadata(title: string, artist: string, channel: string): void {
+    if (this.disconnected) return;
+    try {
+      const metaStr = this.formatMetadata(title, artist, channel);
+      this.writer.queue({ StreamTitle: ` ${metaStr};` });
+    } catch (err) {
+      console.error('Metadata queue error:', err);
     }
-
-    const leftover = this.buffer.length - offset;
-    if (leftover > 0) {
-      this.buffer = this.buffer.slice(offset);
-    } else {
-      this.buffer = Buffer.alloc(0);
-    }
-
-    return output;
   }
 
-  private createMetadataBlock(): Buffer {
-    if (this.metadata.length === 0) {
-      return Buffer.from([0]);
+  writeAudio(chunk: Buffer): boolean {
+    if (this.disconnected) return false;
+
+    const ok = this.writer.write(chunk);
+    this.lastDataTime = Date.now();
+
+    if (!ok) {
+      this.queueBytes += chunk.length;
     }
-    const encoded = Buffer.from(this.metadata, 'utf-8');
-    const rawLen = Math.min(encoded.length, MAX_METADATA_LEN);
-    const paddedLen = ((rawLen + 15) >> 4) << 4;
-    const N = paddedLen >> 4;
-    const data = encoded.slice(0, rawLen);
-    const padding = Buffer.alloc(paddedLen - rawLen, 0);
-    return Buffer.concat([Buffer.from([N]), data, padding]);
+
+    if (this.queueBytes > CLIENT_QUEUE_MAX_BYTES) {
+      this.disconnect('Client queue overflow (fell too far behind)');
+      return false;
+    }
+
+    return ok;
   }
 
-  flush(): Buffer[] {
-    if (this.buffer.length === 0) return [];
-    const output = [this.buffer];
-    this.buffer = Buffer.alloc(0);
-    return output;
+  getLagMs(sourceStartTime: number): number {
+    const elapsed = Date.now() - sourceStartTime;
+    return elapsed;
+  }
+
+  isBehind(elapsedMs: number): boolean {
+    return elapsedMs > CLIENT_LAG_MAX_MS && this.queueBytes > CLIENT_QUEUE_MAX_BYTES / 2;
+  }
+
+  disconnect(reason: string): void {
+    if (this.disconnected) return;
+    this.disconnected = true;
+    console.log(`  ✗ Dropped client: ${reason}`);
+    try {
+      this.writer.destroy();
+      this.res.end();
+    } catch {
+      // already closed
+    }
+  }
+
+  isAlive(): boolean {
+    return !this.disconnected && this.res.writable && !this.res.writableEnded;
   }
 }
 
-const metadataInjector = new MetadataInjector();
+// ====================== CLIENT MANIFOLD ======================
+class ClientManifold {
+  private _clients: ClientConnection[] = [];
 
+  get clients(): ClientConnection[] {
+    return this._clients;
+  }
+
+  add(client: ClientConnection): void {
+    this._clients.push(client);
+  }
+
+  remove(client: ClientConnection): void {
+    const idx = this._clients.indexOf(client);
+    if (idx !== -1) {
+      this._clients.splice(idx, 1);
+    }
+  }
+
+  get size(): number {
+    return this._clients.length;
+  }
+
+  broadcastAudio(chunk: Buffer, trackTitle: string, trackAuthor: string, trackChannel: string, sourceStartTime: number): void {
+    if (this._clients.length === 0) return;
+
+    const toRemove: ClientConnection[] = [];
+
+    for (const client of this._clients) {
+      if (!client.isAlive()) {
+        toRemove.push(client);
+        continue;
+      }
+
+      const elapsed = Date.now() - sourceStartTime;
+
+      if (client.isBehind(elapsed)) {
+        toRemove.push(client);
+        client.disconnect('Client fell too far behind');
+        continue;
+      }
+
+      client.writeAudio(chunk);
+    }
+
+    for (const client of toRemove) {
+      this.remove(client);
+    }
+  }
+
+  broadcastMetadata(title: string, artist: string, channel: string): void {
+    for (const client of this._clients) {
+      if (client.isAlive()) {
+        client.queueMetadata(title, artist, channel);
+      }
+    }
+  }
+
+  getActiveCount(): number {
+    return this._clients.filter(c => c.isAlive()).length;
+  }
+
+  prune(): number {
+    const before = this._clients.length;
+    this._clients = this._clients.filter(c => c.isAlive());
+    const removed = before - this._clients.length;
+    if (removed > 0) {
+      console.log(`Pruned ${removed} dead client(s) (remaining: ${this._clients.length})`);
+    }
+    return removed;
+  }
+}
+
+const manifold = new ClientManifold();
+
+// ====================== ACTIVE STREAM STATE ======================
+let currentReadStream: fs.ReadStream | null = null;
+let currentTrackData: Track | null = null;
+let currentByteOffset = 0;
+let trackStartTime = Date.now();
 
 // ====================== PLAYLIST MANAGEMENT ======================
 function refreshPlaylist(): void {
@@ -264,12 +361,13 @@ function startCurrentTrack(): void {
 
   currentTrackData = track;
   currentByteOffset = 0;
+  trackStartTime = Date.now();
 
   const displayTitle = track.title || path.basename(filePath);
   const channelInfo = track.channel?.title ? ` [${track.channel.title}]` : '';
   console.log(`▶️  Broadcasting: ${displayTitle}${channelInfo} (startOffset: ${startOffset})`);
 
-  metadataInjector.setMetadata(
+  manifold.broadcastMetadata(
     track.title || path.basename(filePath),
     track.author,
     track.channel?.title ?? 'Unknown'
@@ -285,22 +383,17 @@ function startCurrentTrack(): void {
 
   currentReadStream.on('data', (raw: Buffer | string) => {
     const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(raw as string);
-    const injected = metadataInjector.push(buf);
     currentByteOffset += buf.length;
 
-    const disconnected: http.ServerResponse[] = [];
-    for (const res of activeClients) {
-      if (res.writable && !res.writableEnded) {
-        for (const chunk of injected) {
-          res.write(chunk);
-        }
-      } else {
-        disconnected.push(res);
-      }
-    }
-    for (const res of disconnected) {
-      activeClients.delete(res);
-    }
+    manifold.broadcastAudio(
+      buf,
+      track.title || path.basename(filePath),
+      track.author,
+      track.channel?.title ?? 'Unknown',
+      trackStartTime
+    );
+
+    manifold.prune();
 
     const elapsedSec = (Date.now() - startTime) / 1000;
     const expectedBytes = elapsedSec * (BITRATE_BPS / 8);
@@ -373,7 +466,7 @@ function advanceToNextTrack(): void {
 // ====================== HTTP SERVER ======================
 const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   if (req.url === '/stream.mp3' || req.url === '/' || req.url === '/stream') {
-    console.log('New client connected — joining live broadcast');
+    console.log(`New client connected (active: ${manifold.getActiveCount() + 1})`);
 
     res.writeHead(200, {
       'Content-Type': 'audio/mpeg',
@@ -382,19 +475,30 @@ const server = http.createServer((req: http.IncomingMessage, res: http.ServerRes
       'icy-genre': 'Podcast',
       'icy-pub': '1',
       'icy-br': '128',
-      'icy-metaint': '16000',
+      'icy-metaint': String(METAIMNT),
       'Cache-Control': 'no-cache, no-store, must-revalidate',
       'Connection': 'keep-alive',
       'Pragma': 'no-cache',
       'Expires': '0',
     });
 
-    activeClients.add(res);
+    const client = new ClientConnection(res);
+    manifold.add(client);
 
-    req.on('close', () => {
-      activeClients.delete(res);
-      console.log('Client disconnected (remaining: ' + activeClients.size + ')');
-    });
+    if (currentTrackData) {
+      client.queueMetadata(
+        currentTrackData.title || path.basename(currentTrackData.audioPath),
+        currentTrackData.author,
+        currentTrackData.channel?.title ?? 'Unknown'
+      );
+    }
+
+    const cleanup = () => {
+      manifold.remove(client);
+      console.log(`Client disconnected (remaining: ${manifold.getActiveCount()})`);
+    };
+
+    res.on('close', cleanup);
 
     if (!currentReadStream && state.playlist.length > 0) {
       startCurrentTrack();
@@ -408,10 +512,9 @@ const server = http.createServer((req: http.IncomingMessage, res: http.ServerRes
 
 // ====================== STARTUP ======================
 server.listen(PORT, () => {
-  console.log(`🚀 FrogRock BROADCAST server listening on http://localhost:${PORT}/stream.mp3`);
-  console.log('   → All clients hear the exact same live stream');
-  console.log('   → Global state is immutable');
-  console.log('   → Clients have ZERO control over playback position');
+  console.log(`FrogRock BROADCAST server listening on http://localhost:${PORT}/stream.mp3`);
+  console.log(`  → Per-client ICY manifold (queue max: ${CLIENT_QUEUE_MAX_BYTES}B, lag limit: ${CLIENT_LAG_MAX_MS}ms)`);
+  console.log(`  → Slow clients are dropped automatically`);
 
   refreshPlaylist();
 
@@ -431,6 +534,8 @@ server.on('error', (err: Error) => {
 process.on('SIGINT', () => {
   console.log('\nShutting down...');
   if (currentReadStream) currentReadStream.destroy();
-  for (const res of activeClients) res.end();
+  for (const client of manifold.clients) {
+    client.disconnect('Server shutdown');
+  }
   server.close(() => process.exit(0));
 });
