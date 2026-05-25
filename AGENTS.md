@@ -1,0 +1,1 @@
+don't run the server locally, it must be ran within its docker container,  deploy to docker if you have to
