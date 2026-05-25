@@ -6,5 +6,5 @@ services:
     ports:
       - "${PORT:-8090}:8090"
     volumes:
-      - "${HOST_CACHE_DIR}:/cache:ro"
+      - "${HOST_CACHE_DIR}:/cache"
     restart: unless-stopped

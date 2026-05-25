@@ -152,9 +152,13 @@ class MetadataInjector {
     if (this.metadata.length === 0) {
       return Buffer.from([0]);
     }
-    const encoded = Buffer.from(this.metadata, 'utf16le');
-    const len = encoded.length > 255 ? 255 : encoded.length;
-    return Buffer.concat([Buffer.from([len]), encoded.slice(0, len)]);
+    const encoded = Buffer.from(this.metadata, 'utf-8');
+    const rawLen = Math.min(encoded.length, MAX_METADATA_LEN);
+    const paddedLen = ((rawLen + 15) >> 4) << 4;
+    const N = paddedLen >> 4;
+    const data = encoded.slice(0, rawLen);
+    const padding = Buffer.alloc(paddedLen - rawLen, 0);
+    return Buffer.concat([Buffer.from([N]), data, padding]);
   }
 
   flush(): Buffer[] {
@@ -244,12 +248,26 @@ function startCurrentTrack(): void {
     return;
   }
 
+  let startOffset = 0;
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    const header = Buffer.alloc(10);
+    fs.readSync(fd, header, 0, 10, 0);
+    fs.closeSync(fd);
+    if (header.toString('ascii', 0, 3) === 'ID3') {
+      const size = (header[6] & 0x7f) * 16777216 + (header[7] & 0x7f) * 65536 + (header[8] & 0x7f) * 256 + (header[9] & 0x7f);
+      startOffset = 10 + size;
+    }
+  } catch {
+    startOffset = 0;
+  }
+
   currentTrackData = track;
   currentByteOffset = 0;
 
   const displayTitle = track.title || path.basename(filePath);
   const channelInfo = track.channel?.title ? ` [${track.channel.title}]` : '';
-  console.log(`▶️  Broadcasting: ${displayTitle}${channelInfo}`);
+  console.log(`▶️  Broadcasting: ${displayTitle}${channelInfo} (startOffset: ${startOffset})`);
 
   metadataInjector.setMetadata(
     track.title || path.basename(filePath),
@@ -259,6 +277,7 @@ function startCurrentTrack(): void {
 
   currentReadStream = fs.createReadStream(filePath, {
     highWaterMark: 16384,
+    start: startOffset,
   });
 
   const BITRATE_BPS = 128 * 1024;
@@ -266,19 +285,17 @@ function startCurrentTrack(): void {
 
   currentReadStream.on('data', (raw: Buffer | string) => {
     const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(raw as string);
-    const chunkLength = buf.length;
-    currentByteOffset += chunkLength;
-
-    const outputChunks = metadataInjector.push(buf);
+    const injected = metadataInjector.push(buf);
+    currentByteOffset += buf.length;
 
     const disconnected: http.ServerResponse[] = [];
-    for (const out of outputChunks) {
-      for (const res of activeClients) {
-        if (res.writable && !res.writableEnded) {
-          res.write(out);
-        } else {
-          disconnected.push(res);
+    for (const res of activeClients) {
+      if (res.writable && !res.writableEnded) {
+        for (const chunk of injected) {
+          res.write(chunk);
         }
+      } else {
+        disconnected.push(res);
       }
     }
     for (const res of disconnected) {
@@ -301,17 +318,6 @@ function startCurrentTrack(): void {
 
   currentReadStream.on('end', () => {
     console.log(`✓ Finished: ${track.title || path.basename(filePath)}`);
-
-    const leftover = metadataInjector.flush();
-    if (leftover.length > 0) {
-      for (const out of leftover) {
-        for (const res of activeClients) {
-          if (res.writable && !res.writableEnded) {
-            res.write(out);
-          }
-        }
-      }
-    }
 
     const newCompleted = new Set(state.completedTracks);
     newCompleted.add(track.id);
