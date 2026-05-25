@@ -11,8 +11,7 @@ import 'dotenv/config';
 import http from 'http';
 import fs from 'fs';
 import path from 'path';
-import { execFileSync } from 'child_process';
-import CodecParser, { CodecFrame } from 'codec-parser';
+import CodecParser, { CodecFrame, MPEGHeader } from 'codec-parser';
 import { Writer } from './src/icy-writer';
 
 // ====================== EXHAUSTIVE TYPES (from index.json.example) ======================
@@ -73,7 +72,6 @@ const CLIENT_LAG_MAX_MS = parseInt(process.env.CLIENT_LAG_MAX_MS || '10000', 10)
 
 // Burst buffer for new-client prebuffering (duration in seconds, resized per track)
 const BURST_DURATION_SEC = parseInt(process.env.BURST_DURATION_SEC || '8', 10);
-let burstCapacity: number = 65536;
 
 // ====================== STARTUP CHECKS ======================
 if (CACHE_DIR === 'UNCONFIGURED') {
@@ -108,53 +106,29 @@ function updateState(partial: StatePartial): void {
   state = Object.freeze(newState);
 }
 
-// ====================== CIRCULAR BUFFER (burst backlog) ======================
-class CircularBuffer {
-  private buffer: Buffer;
-  private head: number = 0;
-  private size: number = 0;
+// ====================== BURST BUFFER (frame-aligned backlog) ======================
+class BurstBuffer {
+  private frames: Buffer[] = [];
+  private capacity: number;
 
   constructor(capacity: number) {
-    this.buffer = Buffer.allocUnsafe(capacity);
+    this.capacity = capacity;
   }
 
-  push(chunk: Buffer): void {
-    let offset = 0;
-    while (offset < chunk.length) {
-      const writePos = (this.head + this.size) % this.buffer.length;
-      const remaining = this.buffer.length - writePos;
-
-      if (this.size < this.buffer.length) {
-        const toWrite = Math.min(chunk.length - offset, remaining, this.buffer.length - this.size);
-        chunk.copy(this.buffer, writePos, offset, offset + toWrite);
-        offset += toWrite;
-        this.size += toWrite;
-      } else {
-        const toWrite = Math.min(chunk.length - offset, remaining);
-        chunk.copy(this.buffer, writePos, offset, offset + toWrite);
-        this.head = (this.head + toWrite) % this.buffer.length;
-        offset += toWrite;
-      }
+  push(frame: Buffer): void {
+    this.frames.push(frame);
+    while (this.frames.length > this.capacity) {
+      this.frames.shift();
     }
   }
 
-  peek(maxBytes: number): Buffer {
-    if (this.size === 0) return Buffer.alloc(0);
-    const toRead = Math.min(maxBytes, this.size);
-    const result = Buffer.allocUnsafe(toRead);
-    let offset = 0;
-    while (offset < toRead) {
-      const readPos = (this.head + offset) % this.buffer.length;
-      const remaining = this.buffer.length - readPos;
-      const toCopy = Math.min(toRead - offset, remaining);
-      this.buffer.copy(result, offset, readPos, readPos + toCopy);
-      offset += toCopy;
-    }
-    return result;
+  peek(): Buffer {
+    if (this.frames.length === 0) return Buffer.alloc(0);
+    return Buffer.concat(this.frames);
   }
 
   getAvailable(): number {
-    return this.size;
+    return this.frames.length;
   }
 }
 
@@ -219,9 +193,9 @@ class ClientConnection {
     return ok;
   }
 
-  burstFromBuffer(buffer: CircularBuffer): void {
+  burstFromBuffer(buffer: BurstBuffer): void {
     if (this.disconnected) return;
-    const data = buffer.peek(burstCapacity);
+    const data = buffer.peek();
     if (data.length > 0) {
       this.writer.write(data);
     }
@@ -329,7 +303,7 @@ class ClientManifold {
 }
 
 const manifold = new ClientManifold();
-let audioBuffer = new CircularBuffer(burstCapacity);
+let audioBuffer = new BurstBuffer(0);
 
 // ====================== ACTIVE STREAM STATE ======================
 let isPlaying = false;
@@ -338,6 +312,7 @@ let currentByteOffset = 0;
 let trackStartTime = Date.now();
 let currentTrackBitrate = 0;
 let currentTrackFileSize = 0;
+let currentFrameSize = 417;
 
 // ====================== PLAYLIST MANAGEMENT ======================
 function refreshPlaylist(): void {
@@ -392,24 +367,37 @@ function saveCompletedTracks(): void {
   }
 }
 
-// ====================== BITRATE PROBING ======================
-function probeBitrate(filePath: string): number {
-  try {
-    const output = execFileSync('ffprobe', [
-      '-v', 'quiet',
-      '-select_streams', 'a:0',
-      '-show_entries', 'stream=bit_rate',
-      '-of', 'csv=p=0',
-      filePath,
-    ]).toString().trim();
-    const bitrate = parseInt(output, 10);
-    if (!isNaN(bitrate) && bitrate > 0) {
-      return bitrate;
-    }
-  } catch {
-    // ffprobe failed or not available
+// ====================== FRAME PROBING ======================
+function probeFirstFrames(filePath: string, startOffset: number): {
+  bitrate: number;
+  frameSize: number;
+  frames: CodecFrame[];
+} {
+  const fd = fs.openSync(filePath, 'r');
+  const buf = Buffer.alloc(4096);
+  const read = fs.readSync(fd, buf, 0, 4096, startOffset);
+  fs.closeSync(fd);
+
+  const parser = new CodecParser('audio/mpeg', { enableFrameCRC32: false });
+  const frames = [...parser.parseChunk(buf.slice(0, read)) as unknown as Generator<CodecFrame>];
+
+  if (frames.length === 0) {
+    console.error(`FATAL: No parseable MP3 frames in ${filePath}`);
+    process.exit(1);
   }
-  return 0;
+
+  const header = frames[0].header as MPEGHeader;
+  const bitrate = header.bitrate * 1000;
+  const frameSize = Math.max(...frames.slice(0, 5).map(f => f.data.length));
+
+  return { bitrate, frameSize, frames };
+}
+
+function computeBurstCapacity(frameSize: number, bitrate: number): number {
+  const maxMetadataSize = 1 + 16 * 255;
+  const contentAwareFrames = Math.ceil((METAIMNT + maxMetadataSize) / frameSize) + 2;
+  const timeBasedFrames = Math.ceil((bitrate / 8 * BURST_DURATION_SEC) / frameSize);
+  return Math.max(contentAwareFrames, timeBasedFrames);
 }
 
 // ====================== STATUS PERSISTENCE ======================
@@ -476,19 +464,18 @@ function startCurrentTrack(): void {
   currentTrackData = track;
   currentByteOffset = 0;
   trackStartTime = Date.now();
-  currentTrackBitrate = probeBitrate(filePath);
-  if (currentTrackBitrate === 0) {
-    console.error(`FATAL: Failed to probe bitrate for ${filePath}`);
-    process.exit(1);
-  }
   currentTrackFileSize = fs.statSync(filePath).size;
 
-  burstCapacity = Math.ceil(currentTrackBitrate / 8 * BURST_DURATION_SEC);
-  audioBuffer = new CircularBuffer(burstCapacity);
+  const { bitrate, frameSize, frames: probeFrames } = probeFirstFrames(filePath, startOffset);
+  currentTrackBitrate = bitrate;
+  currentFrameSize = frameSize;
+
+  const burstCapacityFrames = computeBurstCapacity(currentFrameSize, currentTrackBitrate);
+  audioBuffer = new BurstBuffer(burstCapacityFrames);
 
   const displayTitle = track.title || path.basename(filePath);
   const channelInfo = track.channel?.title ? ` [${track.channel.title}]` : '';
-  console.log(`▶️  Broadcasting: ${displayTitle}${channelInfo} (startOffset: ${startOffset})`);
+  console.log(`▶️  Broadcasting: ${displayTitle}${channelInfo} (startOffset: ${startOffset}, bitrate: ${currentTrackBitrate / 1000}kbps, frameSize: ${currentFrameSize}, burst: ${burstCapacityFrames} frames)`);
 
   manifold.broadcastMetadata(
     track.title || path.basename(filePath),
@@ -496,14 +483,25 @@ function startCurrentTrack(): void {
     track.channel?.title ?? 'Unknown'
   );
 
- isPlaying = true;
+  for (const frame of probeFrames) {
+    manifold.broadcastAudio(
+      Buffer.from(frame.data),
+      track.title || path.basename(filePath),
+      track.author,
+      track.channel?.title ?? 'Unknown',
+      trackStartTime
+    );
+  }
+
+  isPlaying = true;
+  const probeBytesConsumed = probeFrames.reduce((sum, f) => sum + f.data.length, 0);
   const fd = fs.openSync(filePath, 'r');
   const audioBytes = currentTrackFileSize - startOffset;
   const contentLengthSec = audioBytes / (currentTrackBitrate / 8);
   const parser = new CodecParser('audio/mpeg', { enableFrameCRC32: false });
   const streamLoop = async () => {
     const t = Date.now();
-    let sent = startOffset;
+    let sent = startOffset + probeBytesConsumed;
 
     while (sent < currentTrackFileSize) {
       const g = (Date.now() - t) / 1000;
@@ -556,7 +554,7 @@ function startCurrentTrack(): void {
   };
 
   streamLoop().catch((err: Error) => {
-    fs.closeSync(fd);
+    try { fs.closeSync(fd); } catch {}
     console.error('Stream error:', err.message);
     advanceToNextTrack();
   });
@@ -655,7 +653,7 @@ const server = http.createServer((req: http.IncomingMessage, res: http.ServerRes
 server.listen(PORT, () => {
   console.log(`FrogRock BROADCAST server listening on http://localhost:${PORT}/stream.mp3`);
   console.log(`  → Per-client ICY manifold (queue max: ${CLIENT_QUEUE_MAX_BYTES}B, lag limit: ${CLIENT_LAG_MAX_MS}ms)`);
-  console.log(`  → New-client burst: ${BURST_DURATION_SEC}s of audio (resized per track bitrate)`);
+  console.log(`  → New-client burst: ${BURST_DURATION_SEC}s / metaint+metadata (frame-aligned, per-track)`);
   console.log(`  → Slow clients are dropped automatically`);
 
   refreshPlaylist();
