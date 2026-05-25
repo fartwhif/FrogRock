@@ -11,6 +11,7 @@ import 'dotenv/config';
 import http from 'http';
 import fs from 'fs';
 import path from 'path';
+import { execFileSync } from 'child_process';
 import { Writer } from './src/icy-writer';
 
 // ====================== EXHAUSTIVE TYPES (from index.json.example) ======================
@@ -61,6 +62,7 @@ const PORT = parseInt(process.env.PORT || '8090', 10);
 const CACHE_DIR = process.env.CACHE_DIR || 'UNCONFIGURED';
 const INDEX_JSON_PATH = path.join(CACHE_DIR, 'index.json');
 const COMPLETED_TRACKS_PATH = path.join(CACHE_DIR, 'completed.json');
+const STATUS_PATH = path.join(CACHE_DIR, 'status.json');
 const METAIMNT = 16000;
 const MAX_METADATA_LEN = 255;
 
@@ -268,6 +270,8 @@ let currentReadStream: fs.ReadStream | null = null;
 let currentTrackData: Track | null = null;
 let currentByteOffset = 0;
 let trackStartTime = Date.now();
+let currentTrackBitrate = 0;
+let currentTrackFileSize = 0;
 
 // ====================== PLAYLIST MANAGEMENT ======================
 function refreshPlaylist(): void {
@@ -322,6 +326,51 @@ function saveCompletedTracks(): void {
   }
 }
 
+// ====================== BITRATE PROBING ======================
+function probeBitrate(filePath: string): number {
+  try {
+    const output = execFileSync('ffprobe', [
+      '-v', 'quiet',
+      '-select_streams', 'a:0',
+      '-show_entries', 'stream=bit_rate',
+      '-of', 'csv=p=0',
+      filePath,
+    ]).toString().trim();
+    const bitrate = parseInt(output, 10);
+    if (!isNaN(bitrate) && bitrate > 0) {
+      return bitrate;
+    }
+  } catch {
+    // ffprobe failed or not available
+  }
+  return 0;
+}
+
+// ====================== STATUS PERSISTENCE ======================
+function writeStatus(): void {
+  const status = currentReadStream ? 'playing' : 'idle';
+  const elapsedMs = Date.now() - trackStartTime;
+  const statusObj = {
+    status,
+    currentTrack: currentTrackData,
+    bitrate: currentTrackBitrate,
+    byteOffset: currentByteOffset,
+    fileSize: currentTrackFileSize,
+    percentage: currentTrackFileSize > 0 ? Math.round((currentByteOffset / currentTrackFileSize) * 10000) / 100 : 0,
+    elapsedSec: Math.round(elapsedMs / 1000 * 1000) / 1000,
+    trackElapsedMs: elapsedMs,
+    listeners: manifold.getActiveCount(),
+    timestamp: new Date().toISOString(),
+  };
+  try {
+    const tmpPath = STATUS_PATH + '.tmp';
+    fs.writeFileSync(tmpPath, JSON.stringify(statusObj, null, 2));
+    fs.renameSync(tmpPath, STATUS_PATH);
+  } catch (error) {
+    console.error('Error writing status:', error);
+  }
+}
+
 // ====================== BROADCAST STREAMING ======================
 function startCurrentTrack(): void {
   if (currentReadStream) {
@@ -362,6 +411,8 @@ function startCurrentTrack(): void {
   currentTrackData = track;
   currentByteOffset = 0;
   trackStartTime = Date.now();
+  currentTrackBitrate = probeBitrate(filePath);
+  currentTrackFileSize = fs.statSync(filePath).size;
 
   const displayTitle = track.title || path.basename(filePath);
   const channelInfo = track.channel?.title ? ` [${track.channel.title}]` : '';
@@ -525,6 +576,8 @@ server.listen(PORT, () => {
   }, 500);
 
   setInterval(refreshPlaylist, 5 * 60 * 1000);
+  setInterval(writeStatus, 1000);
+  writeStatus();
 });
 
 server.on('error', (err: Error) => {
@@ -533,6 +586,7 @@ server.on('error', (err: Error) => {
 
 process.on('SIGINT', () => {
   console.log('\nShutting down...');
+  writeStatus();
   if (currentReadStream) currentReadStream.destroy();
   for (const client of manifold.clients) {
     client.disconnect('Server shutdown');
