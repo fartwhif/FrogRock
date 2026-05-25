@@ -15,10 +15,17 @@
     "docker:down": "docker compose down",
     "docker:logs": "docker compose logs -f"
   },
-  "keywords": ["radio", "streaming", "broadcast", "podcast", "drivepod"],
+  "keywords": [
+    "radio",
+    "streaming",
+    "broadcast",
+    "podcast",
+    "drivepod"
+  ],
   "author": "FrogRock",
   "license": "MIT",
   "dependencies": {
+    "codec-parser": "^2.5.0",
     "dotenv": "^16.3.1",
     "ecma-iceclient": "github:mo-g/ecma-iceclient"
   },
