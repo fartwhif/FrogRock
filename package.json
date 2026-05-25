@@ -18,6 +18,9 @@
   "keywords": ["radio", "streaming", "broadcast", "podcast", "drivepod"],
   "author": "FrogRock",
   "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.3.1"
+  },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "typescript": "^5.0.0"

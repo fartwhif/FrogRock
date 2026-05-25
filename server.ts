@@ -98,6 +98,77 @@ let currentReadStream: fs.ReadStream | null = null;
 let currentTrackData: Track | null = null;
 let currentByteOffset = 0;
 
+// ====================== ICY METADATA INJECTOR ======================
+const METAIMNT = 16000;
+const MAX_METADATA_LEN = 255;
+
+class MetadataInjector {
+  private buffer: Buffer = Buffer.alloc(0);
+  private bytesSinceMeta: number = 0;
+  private metadata: string = '';
+
+  setMetadata(title: string, artist: string, channel: string): void {
+    const raw = `${title} - ${artist} [${channel}]`;
+    this.metadata = raw.length > MAX_METADATA_LEN ? raw.slice(0, MAX_METADATA_LEN) : raw;
+  }
+
+  push(chunk: Buffer): Buffer[] {
+    this.buffer = Buffer.concat([this.buffer, chunk]);
+    const output: Buffer[] = [];
+    let offset = 0;
+
+    while (offset < this.buffer.length) {
+      const remaining = this.buffer.length - offset;
+      const distToMeta = METAIMNT - this.bytesSinceMeta;
+
+      if (distToMeta <= 0) {
+        output.push(this.createMetadataBlock());
+        this.bytesSinceMeta = 0;
+        continue;
+      }
+
+      if (remaining <= distToMeta) {
+        output.push(this.buffer.slice(offset));
+        this.bytesSinceMeta += remaining;
+        offset = this.buffer.length;
+      } else {
+        output.push(this.buffer.slice(offset, offset + distToMeta));
+        offset += distToMeta;
+        this.bytesSinceMeta = METAIMNT;
+      }
+    }
+
+    const leftover = this.buffer.length - offset;
+    if (leftover > 0) {
+      this.buffer = this.buffer.slice(offset);
+    } else {
+      this.buffer = Buffer.alloc(0);
+    }
+
+    return output;
+  }
+
+  private createMetadataBlock(): Buffer {
+    if (this.metadata.length === 0) {
+      return Buffer.from([0]);
+    }
+    const encoded = Buffer.from(this.metadata, 'utf8');
+    const len = encoded.length;
+    const header = Buffer.alloc(4);
+    header.writeUInt32BE(len, 0);
+    return Buffer.concat([header, encoded]);
+  }
+
+  flush(): Buffer[] {
+    if (this.buffer.length === 0) return [];
+    const output = [this.buffer];
+    this.buffer = Buffer.alloc(0);
+    return output;
+  }
+}
+
+const metadataInjector = new MetadataInjector();
+
 
 // ====================== PLAYLIST MANAGEMENT ======================
 function refreshPlaylist(): void {
@@ -182,6 +253,12 @@ function startCurrentTrack(): void {
   const channelInfo = track.channel?.title ? ` [${track.channel.title}]` : '';
   console.log(`▶️  Broadcasting: ${displayTitle}${channelInfo}`);
 
+  metadataInjector.setMetadata(
+    track.title || path.basename(filePath),
+    track.author,
+    track.channel?.title ?? 'Unknown'
+  );
+
   currentReadStream = fs.createReadStream(filePath, {
     highWaterMark: 16384,
   });
@@ -189,16 +266,21 @@ function startCurrentTrack(): void {
   const BITRATE_BPS = 128 * 1024;
   const startTime = Date.now();
 
-  currentReadStream.on('data', (chunk: Buffer | string) => {
-    const chunkLength = Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(chunk as string);
+  currentReadStream.on('data', (raw: Buffer | string) => {
+    const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(raw as string);
+    const chunkLength = buf.length;
     currentByteOffset += chunkLength;
 
+    const outputChunks = metadataInjector.push(buf);
+
     const disconnected: http.ServerResponse[] = [];
-    for (const res of activeClients) {
-      if (res.writable && !res.writableEnded) {
-        res.write(chunk);
-      } else {
-        disconnected.push(res);
+    for (const out of outputChunks) {
+      for (const res of activeClients) {
+        if (res.writable && !res.writableEnded) {
+          res.write(out);
+        } else {
+          disconnected.push(res);
+        }
       }
     }
     for (const res of disconnected) {
@@ -221,6 +303,17 @@ function startCurrentTrack(): void {
 
   currentReadStream.on('end', () => {
     console.log(`✓ Finished: ${track.title || path.basename(filePath)}`);
+
+    const leftover = metadataInjector.flush();
+    if (leftover.length > 0) {
+      for (const out of leftover) {
+        for (const res of activeClients) {
+          if (res.writable && !res.writableEnded) {
+            res.write(out);
+          }
+        }
+      }
+    }
 
     const newCompleted = new Set(state.completedTracks);
     newCompleted.add(track.id);

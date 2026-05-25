@@ -12,6 +12,8 @@ WORKDIR /app
 ENV PORT=8090
 ENV CACHE_DIR=/cache
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --no-audit --no-fund
 COPY --from=build /app/dist ./dist
 USER appuser
 EXPOSE 8090
