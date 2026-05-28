@@ -13,6 +13,18 @@ import fs from 'fs';
 import path from 'path';
 import CodecParser, { CodecFrame, MPEGHeader } from 'codec-parser';
 import { Writer } from './src/icy-writer';
+import { UAParser } from 'ua-parser-js';
+
+const BROWSER_NAMES = new Set([
+  'Chrome', 'Firefox', 'Safari', 'Edge', 'Opera', 'Brave',
+  'MSIE', 'Trident', 'Vivaldi', 'Yandex', 'SamsungBrowser',
+]);
+
+function isBrowserUserAgent(ua: string | undefined): boolean {
+  if (!ua) return false;
+  const { browser } = new UAParser(ua).getResult();
+  return browser.name ? BROWSER_NAMES.has(browser.name) : false;
+}
 
 // ====================== EXHAUSTIVE TYPES (from index.json.example) ======================
 interface Channel {
@@ -135,29 +147,34 @@ class BurstBuffer {
 // ====================== PER-CLIENT CONNECTION ======================
 class ClientConnection {
   public res: http.ServerResponse;
-  public writer: Writer;
+  public writer: Writer | null;
   private queueBytes: number = 0;
   private lastDataTime: number = Date.now();
   private disconnected: boolean = false;
 
-  constructor(res: http.ServerResponse) {
+  constructor(res: http.ServerResponse, useIcy: boolean) {
     this.res = res;
-    this.writer = new Writer(currentMetaint, {
-      highWaterMark: 32768,
-    });
 
-    this.writer.on('drain', () => {
-      this.queueBytes = 0;
-    });
+    if (useIcy) {
+      this.writer = new Writer(currentMetaint, {
+        highWaterMark: 32768,
+      });
 
-    this.writer.on('error', (err: Error) => {
-      if (!this.disconnected) {
-        console.log(`Client writer error: ${err.message}`);
-        this.disconnect('Writer error');
-      }
-    });
+      this.writer.on('drain', () => {
+        this.queueBytes = 0;
+      });
 
-    this.writer.pipe(res, { end: false });
+      this.writer.on('error', (err: Error) => {
+        if (!this.disconnected) {
+          console.log(`Client writer error: ${err.message}`);
+          this.disconnect('Writer error');
+        }
+      });
+
+      this.writer.pipe(res, { end: false });
+    } else {
+      this.writer = null;
+    }
   }
 
   formatMetadata(title: string, artist: string, channel: string): string {
@@ -165,10 +182,10 @@ class ClientConnection {
     return raw.length > MAX_METADATA_LEN ? raw.slice(0, MAX_METADATA_LEN) : raw;
   }
 
-  queueMetadata(title: string, artist: string, channel: string): void {
-    if (this.disconnected) return;
+  queueMetadata(_title: string, _artist: string, _channel: string): void {
+    if (this.disconnected || !this.writer) return;
     try {
-      const metaStr = this.formatMetadata(title, artist, channel);
+      const metaStr = this.formatMetadata(_title, _artist, _channel);
       this.writer.queue({ StreamTitle: ` ${metaStr};` });
     } catch (err) {
       console.error('Metadata queue error:', err);
@@ -177,27 +194,32 @@ class ClientConnection {
 
   writeAudio(chunk: Buffer): boolean {
     if (this.disconnected) return false;
-
-    const ok = this.writer.write(chunk);
     this.lastDataTime = Date.now();
 
-    if (!ok) {
-      this.queueBytes += chunk.length;
+    if (this.writer) {
+      const ok = this.writer.write(chunk);
+      if (!ok) {
+        this.queueBytes += chunk.length;
+      }
+      if (this.queueBytes > CLIENT_QUEUE_MAX_BYTES) {
+        this.disconnect('Client queue overflow (fell too far behind)');
+        return false;
+      }
+      return true;
     }
 
-    if (this.queueBytes > CLIENT_QUEUE_MAX_BYTES) {
-      this.disconnect('Client queue overflow (fell too far behind)');
-      return false;
-    }
-
-    return ok;
+    return this.res.write(chunk);
   }
 
   burstFromBuffer(buffer: BurstBuffer): void {
     if (this.disconnected) return;
     const data = buffer.peek();
     if (data.length > 0) {
-      this.writer.write(data);
+      if (this.writer) {
+        this.writer.write(data);
+      } else {
+        this.res.write(data);
+      }
     }
   }
 
@@ -210,12 +232,14 @@ class ClientConnection {
     return elapsedMs > CLIENT_LAG_MAX_MS && this.queueBytes > CLIENT_QUEUE_MAX_BYTES / 2;
   }
 
-  disconnect(reason: string): void {
+disconnect(reason: string): void {
     if (this.disconnected) return;
     this.disconnected = true;
-    console.log(`  ✗ Dropped client: ${reason}`);
+    console.log(`  \u2715 Dropped client: ${reason}`);
     try {
-      this.writer.destroy();
+      if (this.writer) {
+        this.writer.destroy();
+      }
       this.res.end();
     } catch {
       // already closed
@@ -605,9 +629,13 @@ function advanceToNextTrack(): void {
 // ====================== HTTP SERVER ======================
 const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   if (req.url === '/stream.mp3' || req.url === '/' || req.url === '/stream') {
-    console.log(`New client connected (active: ${manifold.getActiveCount() + 1})`);
+    const ua = req.headers['user-agent'] || 'unknown';
+    const browser = isBrowserUserAgent(ua);
+    const useIcy = !browser;
 
-    res.writeHead(200, {
+    console.log(`New client connected (active: ${manifold.getActiveCount() + 1}) [UA: ${ua}] ${browser ? '→ no ICY (browser)' : '→ ICY enabled'}`);
+
+    res.writeHead(200, useIcy ? {
       'Content-Type': 'audio/mpeg',
       'icy-name': 'FrogRock Radio',
       'icy-description': 'DrivePod Radio Stream (Live)',
@@ -620,9 +648,16 @@ const server = http.createServer((req: http.IncomingMessage, res: http.ServerRes
        'Transfer-Encoding': 'identity',
       'Pragma': 'no-cache',
       'Expires': '0',
+    } : {
+      'Content-Type': 'audio/mpeg',
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      'Connection': 'close',
+       'Transfer-Encoding': 'identity',
+      'Pragma': 'no-cache',
+      'Expires': '0',
     });
 
-    const client = new ClientConnection(res);
+    const client = new ClientConnection(res, useIcy);
     manifold.add(client);
 
     if (currentTrackData) {
