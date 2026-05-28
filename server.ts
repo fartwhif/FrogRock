@@ -63,7 +63,7 @@ const CACHE_DIR = process.env.CACHE_DIR || 'UNCONFIGURED';
 const INDEX_JSON_PATH = path.join(CACHE_DIR, 'index.json');
 const COMPLETED_TRACKS_PATH = path.join(CACHE_DIR, 'completed.json');
 const STATUS_PATH = path.join(CACHE_DIR, 'status.json');
-const METAIMNT = 16000;
+const METAIMNT_TARGET = 16000;
 const MAX_METADATA_LEN = 255;
 
 // Per-client queue settings (Icecast-style backpressure)
@@ -142,7 +142,7 @@ class ClientConnection {
 
   constructor(res: http.ServerResponse) {
     this.res = res;
-    this.writer = new Writer(METAIMNT, {
+    this.writer = new Writer(currentMetaint, {
       highWaterMark: 32768,
     });
 
@@ -161,7 +161,7 @@ class ClientConnection {
   }
 
   formatMetadata(title: string, artist: string, channel: string): string {
-    const raw = `${title} - ${artist} [${channel}]`;
+    const raw = `${artist} - ${title}`;
     return raw.length > MAX_METADATA_LEN ? raw.slice(0, MAX_METADATA_LEN) : raw;
   }
 
@@ -313,6 +313,7 @@ let trackStartTime = Date.now();
 let currentTrackBitrate = 0;
 let currentTrackFileSize = 0;
 let currentFrameSize = 417;
+let currentMetaint = METAIMNT_TARGET;
 
 // ====================== PLAYLIST MANAGEMENT ======================
 function refreshPlaylist(): void {
@@ -395,7 +396,7 @@ function probeFirstFrames(filePath: string, startOffset: number): {
 
 function computeBurstCapacity(frameSize: number, bitrate: number): number {
   const maxMetadataSize = 1 + 16 * 255;
-  const contentAwareFrames = Math.ceil((METAIMNT + maxMetadataSize) / frameSize) + 2;
+  const contentAwareFrames = Math.ceil((METAIMNT_TARGET + maxMetadataSize) / frameSize) + 2;
   const timeBasedFrames = Math.ceil((bitrate / 8 * BURST_DURATION_SEC) / frameSize);
   return Math.max(contentAwareFrames, timeBasedFrames);
 }
@@ -470,12 +471,16 @@ function startCurrentTrack(): void {
   currentTrackBitrate = bitrate;
   currentFrameSize = frameSize;
 
+  // Calculate metaint as a multiple of frame size to avoid splitting MP3 frames
+  const framesPerMeta = Math.round(METAIMNT_TARGET / frameSize);
+  currentMetaint = framesPerMeta * frameSize;
+
   const burstCapacityFrames = computeBurstCapacity(currentFrameSize, currentTrackBitrate);
   audioBuffer = new BurstBuffer(burstCapacityFrames);
 
   const displayTitle = track.title || path.basename(filePath);
   const channelInfo = track.channel?.title ? ` [${track.channel.title}]` : '';
-  console.log(`▶️  Broadcasting: ${displayTitle}${channelInfo} (startOffset: ${startOffset}, bitrate: ${currentTrackBitrate / 1000}kbps, frameSize: ${currentFrameSize}, burst: ${burstCapacityFrames} frames)`);
+  console.log(`▶️  Broadcasting: ${displayTitle}${channelInfo} (startOffset: ${startOffset}, bitrate: ${currentTrackBitrate / 1000}kbps, frameSize: ${currentFrameSize}, metaint: ${currentMetaint} (${framesPerMeta} frames), burst: ${burstCapacityFrames} frames)`);
 
   manifold.broadcastMetadata(
     track.title || path.basename(filePath),
@@ -609,7 +614,7 @@ const server = http.createServer((req: http.IncomingMessage, res: http.ServerRes
       'icy-genre': 'Podcast',
       'icy-pub': '1',
       'icy-br': String(currentTrackBitrate ? Math.round(currentTrackBitrate / 1000) : 128),
-      'icy-metaint': String(METAIMNT),
+      'icy-metaint': String(currentMetaint),
       'Cache-Control': 'no-cache, no-store, must-revalidate',
       'Connection': 'close',
        'Transfer-Encoding': 'identity',
