@@ -27,7 +27,8 @@
   "dependencies": {
     "codec-parser": "^2.5.0",
     "dotenv": "^16.3.1",
-    "ecma-iceclient": "github:mo-g/ecma-iceclient"
+    "ecma-iceclient": "github:mo-g/ecma-iceclient",
+    "ua-parser-js": "^2.0.10"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
