@@ -645,14 +645,12 @@ const server = http.createServer((req: http.IncomingMessage, res: http.ServerRes
       'icy-metaint': String(currentMetaint),
       'Cache-Control': 'no-cache, no-store, must-revalidate',
       'Connection': 'close',
-       'Transfer-Encoding': 'identity',
       'Pragma': 'no-cache',
       'Expires': '0',
     } : {
       'Content-Type': 'audio/mpeg',
       'Cache-Control': 'no-cache, no-store, must-revalidate',
       'Connection': 'close',
-       'Transfer-Encoding': 'identity',
       'Pragma': 'no-cache',
       'Expires': '0',
     });
