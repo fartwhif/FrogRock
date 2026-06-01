@@ -1,5 +1,5 @@
 # Build stage
-FROM node:22-alpine AS build
+FROM node:22-bookworm-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json tsconfig.json ./
 RUN npm ci --no-audit --no-fund
@@ -9,12 +9,16 @@ COPY server.ts ./
 RUN npx tsc --skipLibCheck
 
 # Runtime stage
-FROM node:22-alpine
+FROM node:22-bookworm-slim
 WORKDIR /app
 ENV PORT=8090
 ENV CACHE_DIR=/cache
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup \
-    && apk add --no-cache wireguard-tools iproute2 su-exec \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wireguard \
+    iproute2 \
+    sudo \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -r appgroup && useradd -r -g appgroup -d /app -s /sbin/nologin appuser \
     && mkdir -p /etc/wireguard
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund
