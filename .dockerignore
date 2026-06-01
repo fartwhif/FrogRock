@@ -5,3 +5,4 @@ dist
 *.log
 *.pid
 *.sh
+!entrypoint.sh
