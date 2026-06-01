@@ -1,37 +1,26 @@
-#!/bin/sh
+#!/bin/bash
 set -e
 
-# Configure WireGuard from env vars
-if [ -n "$WG_PRIVATE_KEY" ]; then
-  echo "Configuring WireGuard..."
+# ── WireGuard tunnel ───────────────────────────────────────────────
+if [ -n "$WG_PRIVATE_KEY" ] && [ -n "$WG_PEER_PUBLIC_KEY" ] && [ -n "$WG_PEER_ENDPOINT" ]; then
+  echo "Configuring WireGuard tunnel..."
 
-  # Create the interface
-  ip link add dev wg0 type wireguard
+  # Fill template placeholders from env vars
+  sed \
+    -e "s|__WG_PRIVATE_KEY__|${WG_PRIVATE_KEY}|g" \
+    -e "s|__WG_ADDRESS__|${WG_ADDRESS:-192.168.0.228/32}|g" \
+    -e "s|__WG_PEER_PUBLIC_KEY__|${WG_PEER_PUBLIC_KEY}|g" \
+    -e "s|__WG_PEER_ALLOWEDIPS__|${WG_PEER_ALLOWEDIPS:-192.168.0.0/20}|g" \
+    -e "s|__WG_PEER_ENDPOINT__|${WG_PEER_ENDPOINT}|g" \
+    -e "s|__WG_PEER_PERSISTENT_KEEPALIVE__|${WG_PEER_PERSISTENT_KEEPALIVE:-25}|g" \
+    /etc/wireguard/wg0.conf.template > /etc/wireguard/wg0.conf
 
-  # Set private key
-  wg set wg0 private-key <(echo "$WG_PRIVATE_KEY")
-
-  # Add peer
-  wg set wg0 \
-    peer "$WG_PEER_PUBLIC_KEY" \
-    endpoint "$WG_PEER_ENDPOINT" \
-    allowed-ips "$WG_PEER_ALLOWEDIPS" \
-    persistent-keepalive "$WG_PEER_PERSISTENT_KEEPALIVE"
-
-  # Set address and bring interface up
-  ip address add "$WG_ADDRESS" dev wg0
-  ip link set mtu 1420 up dev wg0
-
-  # Set DNS if provided
-  if [ -n "$WG_DNS" ]; then
-    echo "nameserver $WG_DNS" > /etc/resolv.conf
-  fi
-
-  echo "WireGuard interface wg0 is up."
+  wg-quick up wg0
+  echo "WireGuard tunnel established"
   wg show
 else
-  echo "WireGuard: skipping (no private key set)."
+  echo "WireGuard: skipping (missing env vars)"
 fi
 
 # Drop to appuser and run the app
-exec su-exec appuser "$@"
+exec sudo -E -u appuser "$@"
