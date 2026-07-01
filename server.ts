@@ -13,17 +13,68 @@ import fs from 'fs';
 import path from 'path';
 import CodecParser, { CodecFrame, MPEGHeader } from 'codec-parser';
 import { Writer } from './src/icy-writer';
-import { UAParser } from 'ua-parser-js';
 
-const BROWSER_NAMES = new Set([
-  'Chrome', 'Firefox', 'Safari', 'Edge', 'Opera', 'Brave',
-  'MSIE', 'Trident', 'Vivaldi', 'Yandex', 'SamsungBrowser',
-]);
+// Whitelist of known ICY/Shoutcast-compatible players.
+// Only these clients receive ICY metadata blocks. All other clients
+// (browsers, unknown agents) get plain audio with no metadata injection.
+// This is safer than a browser blacklist — browsers have infinite UA variants
+// and any miss causes audible glitches from metadata bytes in the audio stream.
+const ICY_CAPABLE_CLIENTS = [
+  // Desktop players
+  'VLC',
+  'Winamp',
+  'WMPlayer',           // Windows Media Player
+  'Foobar2000',
+  'MusicBee',
+  'MPC-HC',
+  'MPC-BE',
+  'KMPlayer',
+  'PotPlayer',
+  'iTunes',
+  'Music',              // macOS Music app
+  'Audacious',
+  'Rhythmbox',
+  'Clementine',
+  'Quod Libet',
+  'LXMusic',
+  'Decibel',
+  'Ampache',
+  'Songbird',
+  // Mobile players
+  'nPlayer',
+  'FX',                 // FX File Explorer built-in player
+  'Neutron',            // Neutron Music Player
+  'PowerAmp',
+  'VLC for Android',
+  'VLC for iOS',
+  'Doppler',
+  // Network/streaming clients
+  'Shoutcast',
+  'Icecast',
+  'Kodi',
+  'Plex',
+  'Jellyfin',
+  'Subsonic',
+  'Navidrome',
+  'Airsonic',
+  'Squeezelite',
+  'Logitech Media Server',
+  'LMS',
+  // Other known good
+  'ffplay',
+  'ffmpeg',
+  'GStreamer',
+  'mpv',
+  'mpv.com',
+  'mplayer',
+  'wmplayer',
+  'WACUP',
+];
 
-function isBrowserUserAgent(ua: string | undefined): boolean {
+function isIcyCapableClient(ua: string | undefined): boolean {
   if (!ua) return false;
-  const { browser } = new UAParser(ua).getResult();
-  return browser.name ? BROWSER_NAMES.has(browser.name) : false;
+  const upper = ua.toUpperCase();
+  return ICY_CAPABLE_CLIENTS.some(client => upper.includes(client.toUpperCase()));
 }
 
 // ====================== EXHAUSTIVE TYPES (from index.json.example) ======================
@@ -630,10 +681,9 @@ function advanceToNextTrack(): void {
 const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   if (req.url === '/stream.mp3' || req.url === '/' || req.url === '/stream') {
     const ua = req.headers['user-agent'] || 'unknown';
-    const browser = isBrowserUserAgent(ua);
-    const useIcy = !browser;
+    const useIcy = isIcyCapableClient(ua);
 
-    console.log(`New client connected (active: ${manifold.getActiveCount() + 1}) [UA: ${ua}] ${browser ? '→ no ICY (browser)' : '→ ICY enabled'}`);
+    console.log(`New client connected (active: ${manifold.getActiveCount() + 1}) [UA: ${ua}] ${useIcy ? '→ ICY enabled' : '→ plain audio (no metadata)'}`);
 
     res.writeHead(200, useIcy ? {
       'Content-Type': 'audio/mpeg',
