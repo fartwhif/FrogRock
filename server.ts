@@ -483,6 +483,8 @@ function writeStatus(): void {
   const statusObj = {
     status,
     currentTrack: currentTrackData,
+    currentTrackIndex: state.currentTrackIndex,
+    completedTracks: Array.from(state.completedTracks),
     bitrate: currentTrackBitrate,
     byteOffset: currentByteOffset,
     fileSize: currentTrackFileSize,
@@ -677,9 +679,70 @@ function advanceToNextTrack(): void {
   startCurrentTrack();
 }
 
+// ====================== MIME TYPES ======================
+const MIME_TYPES: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.svg': 'image/svg+xml',
+  '.webp': 'image/webp',
+  '.ico': 'image/x-icon',
+  '.mp3': 'audio/mpeg',
+};
+
+const PUBLIC_DIR = path.join(__dirname, '..', 'public');
+
+function serveStaticFile(res: http.ServerResponse, filePath: string, contentType?: string): boolean {
+  if (!fs.existsSync(filePath)) {
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('Not found');
+    return false;
+  }
+
+  const ext = path.extname(filePath).toLowerCase();
+  const mime = contentType || MIME_TYPES[ext] || 'application/octet-stream';
+  const data = fs.readFileSync(filePath);
+
+  res.writeHead(200, {
+    'Content-Type': mime,
+    'Cache-Control': 'no-cache, no-store, must-revalidate',
+  });
+  res.end(data);
+  return true;
+}
+
+function serveThumb(res: http.ServerResponse, relPath: string): void {
+  const filePath = path.join(CACHE_DIR, relPath);
+  if (!fs.existsSync(filePath)) {
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('Not found');
+    return;
+  }
+
+  const ext = path.extname(filePath).toLowerCase();
+  const mime = MIME_TYPES[ext] || 'image/webp';
+  const data = fs.readFileSync(filePath);
+
+  res.writeHead(200, {
+    'Content-Type': mime,
+    'Cache-Control': 'public, max-age=3600',
+  });
+  res.end(data);
+}
+
 // ====================== HTTP SERVER ======================
 const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
-  if (req.url === '/stream.mp3' || req.url === '/' || req.url === '/stream') {
+  const url = req.url || '/';
+  const [pathPart, queryString] = url.split('?');
+  const params = new URLSearchParams(queryString || '');
+
+  // Stream endpoint
+  if (pathPart === '/stream.mp3' || pathPart === '/stream') {
     const ua = req.headers['user-agent'] || 'unknown';
     const useIcy = isIcyCapableClient(ua);
 
@@ -730,11 +793,121 @@ const server = http.createServer((req: http.IncomingMessage, res: http.ServerRes
     if (!isPlaying && state.playlist.length > 0) {
       startCurrentTrack();
     }
-
-  } else {
-    res.writeHead(404, { 'Content-Type': 'text/plain' });
-    res.end('Only /stream.mp3 is available');
+    return;
   }
+
+  // API: Status (live from memory)
+  if (pathPart === '/api/status') {
+    res.writeHead(200, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      'Access-Control-Allow-Origin': '*',
+    });
+    const statusObj = {
+      status: isPlaying ? 'playing' : 'idle',
+      currentTrack: currentTrackData,
+      currentTrackIndex: state.currentTrackIndex,
+      bitrate: currentTrackBitrate,
+      byteOffset: currentByteOffset,
+      fileSize: currentTrackFileSize,
+      percentage: currentTrackFileSize > 0 ? Math.round((currentByteOffset / currentTrackFileSize) * 10000) / 100 : 0,
+      elapsedSec: Math.round((Date.now() - trackStartTime) / 1000 * 1000) / 1000,
+      listeners: manifold.getActiveCount(),
+      timestamp: new Date().toISOString(),
+    };
+    res.end(JSON.stringify(statusObj));
+    return;
+  }
+
+  // API: Status file (on-disk status.json)
+  if (pathPart === '/api/status.json') {
+    if (fs.existsSync(STATUS_PATH)) {
+      serveStaticFile(res, STATUS_PATH, 'application/json; charset=utf-8');
+    } else {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end('{"status":"idle","currentTrack":null}');
+    }
+    return;
+  }
+
+  // API: Playlist (filtered from index)
+  if (pathPart === '/api/playlist') {
+    res.writeHead(200, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      'Access-Control-Allow-Origin': '*',
+    });
+    // Return playlist tracks with channel info + completed status
+    const tracks = state.playlist.map(t => ({
+      id: t.id,
+      videoId: t.videoId,
+      title: t.title,
+      author: t.author,
+      duration: t.duration,
+      thumbnailPath: t.thumbnailPath,
+      channel: t.channel ? { title: t.channel.title } : null,
+      completed: state.completedTracks.has(t.id),
+    }));
+    const payload = {
+      tracks,
+      currentTrackIndex: state.currentTrackIndex,
+    };
+    res.end(JSON.stringify(payload));
+    return;
+  }
+
+  // API: Index file (on-disk index.json)
+  if (pathPart === '/api/index.json') {
+    if (fs.existsSync(INDEX_JSON_PATH)) {
+      serveStaticFile(res, INDEX_JSON_PATH, 'application/json; charset=utf-8');
+    } else {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end('[]');
+    }
+    return;
+  }
+
+  // API: Thumbnail
+  if (pathPart === '/api/thumb') {
+    const thumbPath = params.get('path');
+    if (!thumbPath) {
+      res.writeHead(400, { 'Content-Type': 'text/plain' });
+      res.end('Missing path parameter');
+      return;
+    }
+    serveThumb(res, thumbPath);
+    return;
+  }
+
+  // Web player (root)
+  if (pathPart === '/') {
+    const playerPath = path.join(PUBLIC_DIR, 'player.html');
+    if (fs.existsSync(playerPath)) {
+      serveStaticFile(res, playerPath, 'text/html; charset=utf-8');
+    } else {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end('<html><body><h1>FrogRock Radio</h1><p><a href="/stream.mp3">Listen Live</a></p></body></html>');
+    }
+    return;
+  }
+
+  // Static files from public/
+  if (pathPart.startsWith('/static/')) {
+    const fileName = pathPart.slice(8); // remove /static/
+    const filePath = path.join(PUBLIC_DIR, fileName);
+    // Prevent directory traversal
+    if (filePath.startsWith(PUBLIC_DIR)) {
+      serveStaticFile(res, filePath);
+    } else {
+      res.writeHead(403, { 'Content-Type': 'text/plain' });
+      res.end('Forbidden');
+    }
+    return;
+  }
+
+  // 404
+  res.writeHead(404, { 'Content-Type': 'text/plain' });
+  res.end('Not found');
 });
 
 // ====================== STARTUP ======================

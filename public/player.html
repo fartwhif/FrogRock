@@ -1,0 +1,895 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FrogRock Radio</title>
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --surface: #12121a;
+    --surface2: #1a1a26;
+    --border: #2a2a3a;
+    --text: #e0e0e8;
+    --text2: #8888a0;
+    --accent: #6c63ff;
+    --accent2: #4a42cc;
+    --green: #4ade80;
+    --red: #f87171;
+    --yellow: #fbbf24;
+    --radius: 10px;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  .container {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 24px 16px;
+  }
+
+  /* Header */
+  .header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 28px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .logo {
+    font-size: 32px;
+    line-height: 1;
+  }
+
+  .header-text h1 {
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+  }
+
+  .header-text .tagline {
+    color: var(--text2);
+    font-size: 13px;
+    margin-top: 2px;
+  }
+
+  .listeners {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: var(--text2);
+    background: var(--surface);
+    padding: 6px 12px;
+    border-radius: 20px;
+    border: 1px solid var(--border);
+  }
+
+  .listeners .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--red);
+    transition: background 0.3s;
+  }
+
+  .listeners.live .dot {
+    background: var(--green);
+    box-shadow: 0 0 6px var(--green);
+    animation: pulse 2s infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
+
+  /* Now Playing Card */
+  .now-playing {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+    margin-bottom: 20px;
+  }
+
+  .np-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1.2px;
+    color: var(--accent);
+    font-weight: 600;
+    margin-bottom: 14px;
+  }
+
+  .np-main {
+    display: flex;
+    gap: 16px;
+    align-items: flex-start;
+  }
+
+  .np-thumb {
+    width: 100px;
+    height: 100px;
+    border-radius: 8px;
+    background: var(--surface2);
+    flex-shrink: 0;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .np-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .np-thumb .placeholder {
+    font-size: 36px;
+    opacity: 0.3;
+  }
+
+  .np-info { flex: 1; min-width: 0; }
+
+  .np-title {
+    font-size: 16px;
+    font-weight: 600;
+    line-height: 1.3;
+    margin-bottom: 4px;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .np-author {
+    color: var(--text2);
+    font-size: 13px;
+    margin-bottom: 2px;
+  }
+
+  .np-channel {
+    color: var(--accent);
+    font-size: 12px;
+    margin-bottom: 10px;
+  }
+
+  /* Progress */
+  .progress-wrap {
+    margin-top: 8px;
+  }
+
+  .progress-bar-bg {
+    width: 100%;
+    height: 4px;
+    background: var(--surface2);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .progress-bar-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 2px;
+    transition: width 1s linear;
+    width: 0%;
+  }
+
+  .progress-meta {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 6px;
+    font-size: 11px;
+    color: var(--text2);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Player Controls */
+  .player-controls {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px 20px;
+    margin-bottom: 20px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+
+  .play-btn {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: none;
+    color: white;
+    font-size: 18px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    transition: background 0.2s, transform 0.1s;
+  }
+
+  .play-btn:hover { background: var(--accent2); }
+  .play-btn:active { transform: scale(0.95); }
+
+  .volume-wrap {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+  }
+
+  .volume-icon { font-size: 16px; cursor: pointer; }
+
+  .volume-slider {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 90px;
+    height: 4px;
+    background: var(--surface2);
+    border-radius: 2px;
+    outline: none;
+  }
+
+  .volume-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+  }
+
+  .volume-slider::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+    border: none;
+  }
+
+  .status-text {
+    font-size: 12px;
+    color: var(--text2);
+    flex: 1;
+  }
+
+  /* Stream Link Card */
+  .stream-link-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 20px;
+    margin-bottom: 20px;
+  }
+
+  .link-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1.2px;
+    color: var(--text2);
+    font-weight: 600;
+  }
+
+  .link-row {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+  }
+
+  .link-input {
+    flex: 1;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 13px;
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    padding: 8px 12px;
+    outline: none;
+    user-select: all;
+  }
+
+  .link-input:focus {
+    border-color: var(--accent);
+  }
+
+  .copy-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 13px;
+    padding: 8px 14px;
+    cursor: pointer;
+    transition: background 0.2s, border-color 0.2s;
+    white-space: nowrap;
+  }
+
+  .copy-btn:hover {
+    background: var(--border);
+    border-color: var(--accent);
+  }
+
+  .copy-btn.copied {
+    border-color: var(--green);
+    color: var(--green);
+  }
+
+  /* Bitrate badge */
+  .bitrate-badge {
+    font-size: 11px;
+    background: var(--surface2);
+    padding: 3px 8px;
+    border-radius: 4px;
+    color: var(--text2);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Playlist */
+  .playlist-section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+
+  .playlist-header {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .playlist-header h2 {
+    font-size: 14px;
+    font-weight: 600;
+  }
+
+  .playlist-count {
+    font-size: 12px;
+    color: var(--text2);
+  }
+
+  .playlist-list {
+    max-height: 420px;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+
+  .playlist-list::-webkit-scrollbar { width: 6px; }
+  .playlist-list::-webkit-scrollbar-track { background: transparent; }
+  .playlist-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  .track-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 20px;
+    border-bottom: 1px solid var(--border);
+    transition: background 0.15s;
+    cursor: default;
+  }
+
+  .track-item:last-child { border-bottom: none; }
+  .track-item:hover { background: var(--surface2); }
+
+  .track-item.current {
+    background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+    border-left: 3px solid var(--accent);
+    padding-left: 17px;
+  }
+
+  .track-item.completed {
+    opacity: 0.45;
+  }
+
+  .track-num {
+    font-size: 12px;
+    color: var(--text2);
+    width: 24px;
+    text-align: center;
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .track-item.current .track-num {
+    color: var(--accent);
+  }
+
+  .track-thumb-small {
+    width: 40px;
+    height: 40px;
+    border-radius: 4px;
+    background: var(--surface2);
+    flex-shrink: 0;
+    overflow: hidden;
+  }
+
+  .track-thumb-small img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .track-info { flex: 1; min-width: 0; }
+
+  .track-title {
+    font-size: 13px;
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .track-meta {
+    font-size: 11px;
+    color: var(--text2);
+    display: flex;
+    gap: 8px;
+    margin-top: 2px;
+  }
+
+  .track-duration {
+    font-size: 12px;
+    color: var(--text2);
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Empty state */
+  .empty-state {
+    padding: 40px 20px;
+    text-align: center;
+    color: var(--text2);
+    font-size: 14px;
+  }
+
+  /* Loading spinner */
+  .loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 30px;
+    color: var(--text2);
+    font-size: 13px;
+    gap: 8px;
+  }
+
+  .spinner {
+    width: 16px;
+    height: 16px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Footer */
+  .footer {
+    text-align: center;
+    padding: 20px;
+    font-size: 11px;
+    color: var(--text2);
+  }
+
+  /* Responsive */
+  @media (max-width: 500px) {
+    .np-main { flex-direction: column; align-items: center; text-align: center; }
+    .np-thumb { width: 120px; height: 120px; }
+    .volume-slider { width: 60px; }
+    .listeners span:not(.dot) { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <!-- Header -->
+  <div class="header">
+    <div class="logo">🐸</div>
+    <div class="header-text">
+      <h1>FrogRock Radio</h1>
+      <div class="tagline">Live podcast stream</div>
+    </div>
+    <div class="listeners" id="listeners">
+      <span class="dot"></span>
+      <span id="listener-count">0</span> listening
+    </div>
+  </div>
+
+  <!-- Now Playing -->
+  <div class="now-playing" id="now-playing">
+    <div class="np-label">Now Playing</div>
+    <div class="loading" id="np-loading">
+      <div class="spinner"></div> Loading...
+    </div>
+    <div class="np-main" id="np-content" style="display:none;">
+      <div class="np-thumb" id="np-thumb">
+        <span class="placeholder">🎙</span>
+      </div>
+      <div class="np-info">
+        <div class="np-title" id="np-title">—</div>
+        <div class="np-author" id="np-author"></div>
+        <div class="np-channel" id="np-channel"></div>
+        <div class="progress-wrap">
+          <div class="progress-bar-bg">
+            <div class="progress-bar-fill" id="progress-fill"></div>
+          </div>
+          <div class="progress-meta">
+            <span id="progress-elapsed">0:00</span>
+            <span id="progress-duration">0:00</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Player Controls -->
+  <div class="player-controls">
+    <button class="play-btn" id="play-btn" title="Play/Pause">&#9654;</button>
+    <span class="status-text" id="status-text">Disconnected</span>
+    <span class="bitrate-badge" id="bitrate-badge"></span>
+    <div class="volume-wrap">
+      <span class="volume-icon" id="vol-icon">&#128266;</span>
+      <input type="range" class="volume-slider" id="volume-slider" min="0" max="1" step="0.01" value="0.8">
+    </div>
+  </div>
+
+  <!-- Stream Link -->
+  <div class="stream-link-card">
+    <span class="link-label">Stream URL</span>
+    <div class="link-row">
+      <input type="text" class="link-input" id="stream-url" readonly>
+      <button class="copy-btn" id="copy-btn" title="Copy to clipboard">
+        <span id="copy-icon">&#128203;</span>
+        <span id="copy-label">Copy</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- Hidden audio element -->
+  <audio id="audio" preload="none"></audio>
+
+  <!-- Playlist -->
+  <div class="playlist-section">
+    <div class="playlist-header">
+      <h2>Playlist</h2>
+      <span class="playlist-count" id="playlist-count"></span>
+    </div>
+    <div class="playlist-list" id="playlist-list">
+      <div class="loading"><div class="spinner"></div> Loading playlist...</div>
+    </div>
+  </div>
+
+  <div class="footer">FrogRock &mdash; Auto-refreshes every 10s</div>
+</div>
+
+<script>
+const API_BASE = '';
+const REFRESH_INTERVAL = 10000;
+
+// State
+let statusData = null;
+let playlistData = [];
+let completedIds = new Set();
+let audioEl = document.getElementById('audio');
+let isPlaying = false;
+let refreshTimer = null;
+
+// DOM refs
+const playBtn = document.getElementById('play-btn');
+const statusText = document.getElementById('status-text');
+const bitrateBadge = document.getElementById('bitrate-badge');
+const volumeSlider = document.getElementById('volume-slider');
+const volIcon = document.getElementById('vol-icon');
+const npContent = document.getElementById('np-content');
+const npLoading = document.getElementById('np-loading');
+const npTitle = document.getElementById('np-title');
+const npAuthor = document.getElementById('np-author');
+const npChannel = document.getElementById('np-channel');
+const npThumb = document.getElementById('np-thumb');
+const progressFill = document.getElementById('progress-fill');
+const progressElapsed = document.getElementById('progress-elapsed');
+const progressDuration = document.getElementById('progress-duration');
+const listenerCount = document.getElementById('listener-count');
+const listenersEl = document.getElementById('listeners');
+const playlistList = document.getElementById('playlist-list');
+const playlistCount = document.getElementById('playlist-count');
+
+// Format seconds to HH:MM:SS or MM:SS
+function fmt(sec) {
+  if (!sec || sec < 0) return '0:00';
+  sec = Math.floor(sec);
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  if (h > 0) return `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+  return `${m}:${String(s).padStart(2,'0')}`;
+}
+
+// Fetch status from status.json
+async function fetchStatus() {
+  try {
+    const r = await fetch(API_BASE + '/api/status.json');
+    if (!r.ok) return;
+    statusData = await r.json();
+  } catch(e) { /* ignore */ }
+}
+
+// Fetch playlist from index.json
+async function fetchPlaylist() {
+  try {
+    const r = await fetch(API_BASE + '/api/index.json');
+    if (!r.ok) return;
+    playlistData = await r.json();
+  } catch(e) { /* ignore */ }
+}
+
+// Fetch both and update UI
+async function refresh() {
+  await Promise.all([fetchStatus(), fetchPlaylist()]);
+  updateUI();
+}
+
+// Update all UI
+function updateUI() {
+  updateNowPlaying();
+  updatePlaylist();
+  updateListeners();
+}
+
+function updateNowPlaying() {
+  if (!statusData) return;
+
+  const track = statusData.currentTrack;
+  const isLive = statusData.status === 'playing';
+
+  // Listeners dot
+  listenersEl.classList.toggle('live', isLive);
+  listenerCount.textContent = statusData.listeners || 0;
+
+  // Status text
+  if (isLive && track) {
+    statusText.textContent = 'LIVE';
+    statusText.style.color = 'var(--green)';
+  } else {
+    statusText.textContent = 'OFFLINE';
+    statusText.style.color = 'var(--text2)';
+  }
+
+  // Bitrate
+  if (statusData.bitrate) {
+    bitrateBadge.textContent = Math.round(statusData.bitrate / 1000) + ' kbps';
+  }
+
+  if (!track) {
+    npContent.style.display = 'none';
+    npLoading.style.display = 'flex';
+    npLoading.innerHTML = '<div class="spinner"></div> No track selected';
+    return;
+  }
+
+  npLoading.style.display = 'none';
+  npContent.style.display = 'flex';
+
+  // Title
+  npTitle.textContent = track.title || 'Untitled';
+
+  // Author
+  npAuthor.textContent = track.author || '';
+
+  // Channel
+  npChannel.textContent = track.channel?.title ? `📡 ${track.channel.title}` : '';
+
+  // Thumbnail
+  if (track.thumbnailPath) {
+    // thumbnailPath is relative to CACHE_DIR, served via /api/thumb
+    const thumbUrl = `/api/thumb?path=${encodeURIComponent(track.thumbnailPath)}`;
+    npThumb.innerHTML = `<img src="${thumbUrl}" alt="" onerror="this.parentElement.innerHTML='<span class=\\'placeholder\\'>🎙</span>'">`;
+  } else {
+    npThumb.innerHTML = '<span class="placeholder">🎙</span>';
+  }
+
+  // Progress
+  const pct = statusData.percentage || 0;
+  progressFill.style.width = pct + '%';
+
+  const elapsed = statusData.elapsedSec || 0;
+  const duration = track.duration || 0;
+  progressElapsed.textContent = fmt(elapsed);
+  progressDuration.textContent = fmt(duration);
+}
+
+function updatePlaylist() {
+  if (!playlistData.length) {
+    playlistList.innerHTML = '<div class="empty-state">No tracks in playlist</div>';
+    playlistCount.textContent = '';
+    return;
+  }
+
+  playlistCount.textContent = playlistData.length + ' tracks';
+
+  // Use currentTrackIndex from status.json
+  const currentIdx = statusData?.currentTrackIndex ?? -1;
+
+  // Read completed tracks from completed.json
+  let html = '';
+  playlistData.forEach((track, i) => {
+    const isCurrent = i === currentIdx;
+    const isCompleted = statusData?.completedTracks?.includes(track.id) || false;
+    let cls = 'track-item';
+    if (isCurrent) cls += ' current';
+    if (isCompleted) cls += ' completed';
+
+    const thumbSrc = track.thumbnailPath
+      ? `/api/thumb?path=${encodeURIComponent(track.thumbnailPath)}`
+      : '';
+
+    const dur = track.duration ? fmt(track.duration) : '';
+
+    html += `<div class="${cls}">
+      <span class="track-num">${isCurrent ? '▶' : (i + 1)}</span>
+      <div class="track-thumb-small">
+        ${thumbSrc ? `<img src="${thumbSrc}" alt="" loading="lazy" onerror="this.style.display='none'">` : ''}
+      </div>
+      <div class="track-info">
+        <div class="track-title">${escHtml(track.title || 'Untitled')}</div>
+        <div class="track-meta">
+          <span>${escHtml(track.author || '')}</span>
+          ${track.channel?.title ? `<span>· ${escHtml(track.channel.title)}</span>` : ''}
+        </div>
+      </div>
+      ${dur ? `<span class="track-duration">${dur}</span>` : ''}
+    </div>`;
+  });
+
+  playlistList.innerHTML = html;
+
+  // Scroll current into view
+  if (currentIdx >= 0) {
+    const currentEl = playlistList.querySelector('.current');
+    if (currentEl) currentEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }
+}
+
+function updateListeners() {
+  if (statusData) {
+    listenerCount.textContent = statusData.listeners || 0;
+    listenersEl.classList.toggle('live', statusData.status === 'playing');
+  }
+}
+
+function escHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// Audio controls
+const streamUrlEl = document.getElementById('stream-url');
+const copyBtn = document.getElementById('copy-btn');
+const copyLabel = document.getElementById('copy-label');
+
+function getStreamUrl() {
+  return window.location.origin + '/stream.mp3';
+}
+
+// Populate stream URL on load
+streamUrlEl.value = getStreamUrl();
+
+// Copy button
+copyBtn.addEventListener('click', () => {
+  navigator.clipboard.writeText(streamUrlEl.value).then(() => {
+    copyLabel.textContent = 'Copied!';
+    copyBtn.classList.add('copied');
+    setTimeout(() => {
+      copyLabel.textContent = 'Copy';
+      copyBtn.classList.remove('copied');
+    }, 2000);
+  });
+});
+
+function togglePlay() {
+  if (isPlaying) {
+    intentionalPause = true;
+    audioEl.pause();
+    audioEl.src = '';
+    isPlaying = false;
+    playBtn.innerHTML = '&#9654;';
+    statusText.textContent = 'Paused';
+    statusText.style.color = 'var(--yellow)';
+  } else {
+    audioEl.src = getStreamUrl();
+    audioEl.play().then(() => {
+      isPlaying = true;
+      playBtn.innerHTML = '&#9646;&#9646;';
+      statusText.textContent = 'LIVE';
+      statusText.style.color = 'var(--green)';
+    }).catch(err => {
+      statusText.textContent = 'Error: ' + err.message;
+      statusText.style.color = 'var(--red)';
+    });
+  }
+}
+
+playBtn.addEventListener('click', togglePlay);
+
+// Track intentional pauses so we don't show "Stream error"
+let intentionalPause = false;
+
+audioEl.addEventListener('error', () => {
+  if (intentionalPause) {
+    intentionalPause = false;
+    return;
+  }
+  isPlaying = false;
+  playBtn.innerHTML = '&#9654;';
+  statusText.textContent = 'Stream error';
+  statusText.style.color = 'var(--red)';
+});
+
+audioEl.addEventListener('waiting', () => {
+  statusText.textContent = 'Buffering...';
+  statusText.style.color = 'var(--yellow)';
+});
+
+audioEl.addEventListener('playing', () => {
+  statusText.textContent = 'LIVE';
+  statusText.style.color = 'var(--green)';
+});
+
+// Volume
+volumeSlider.addEventListener('input', (e) => {
+  audioEl.volume = parseFloat(e.target.value);
+});
+
+volIcon.addEventListener('click', () => {
+  if (audioEl.volume > 0) {
+    audioEl.dataset.prevVol = audioEl.volume;
+    audioEl.volume = 0;
+    volumeSlider.value = 0;
+    volIcon.textContent = '\u{1f507}';
+  } else {
+    const prev = audioEl.dataset.prevVol || 0.8;
+    audioEl.volume = prev;
+    volumeSlider.value = prev;
+    volIcon.textContent = '\u{1f50a}';
+  }
+});
+
+audioEl.volume = parseFloat(volumeSlider.value);
+
+// Auto-refresh
+refresh();
+refreshTimer = setInterval(refresh, REFRESH_INTERVAL);
+
+// Also refresh on visibility change (came back to tab)
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) refresh();
+});
+</script>
+</body>
+</html>
