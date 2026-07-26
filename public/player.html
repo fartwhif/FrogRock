@@ -166,6 +166,19 @@
     margin-bottom: 10px;
   }
 
+  .np-yt-link {
+    display: none;
+    color: var(--text2);
+    font-size: 12px;
+    text-decoration: none;
+    margin-bottom: 10px;
+    cursor: pointer;
+  }
+  .np-yt-link:hover {
+    color: var(--accent);
+    text-decoration: underline;
+  }
+
   /* Progress */
   .progress-wrap {
     margin-top: 8px;
@@ -534,6 +547,7 @@
         <div class="np-title" id="np-title">—</div>
         <div class="np-author" id="np-author"></div>
         <div class="np-channel" id="np-channel"></div>
+        <a class="np-yt-link" id="yt-link" href="#" target="_blank" rel="noopener" title="Open on YouTube">▶ YouTube</a>
         <div class="progress-wrap">
           <div class="progress-bar-bg">
             <div class="progress-bar-fill" id="progress-fill"></div>
@@ -680,9 +694,11 @@ function updateNowPlaying() {
     statusText.style.color = 'var(--text2)';
   }
 
-  // Bitrate
+  // Bitrate + channel info
   if (statusData.bitrate) {
-    bitrateBadge.textContent = Math.round(statusData.bitrate / 1000) + ' kbps';
+    const kbps = Math.round(statusData.bitrate / 1000);
+    const ch = statusData.channels === 1 ? ' mono' : statusData.channels === 2 ? ' stereo' : '';
+    bitrateBadge.textContent = kbps + ' kbps' + ch;
   }
 
   if (!track) {
@@ -698,11 +714,24 @@ function updateNowPlaying() {
   // Title
   npTitle.textContent = track.title || 'Untitled';
 
-  // Author
-  npAuthor.textContent = track.author || '';
+  // Author - show channel only if different from author
+   npAuthor.textContent = track.author || '';
+   npChannel.textContent = (track.channel?.title && track.channel.title !== track.author)
+     ? `\u{1F4EB} ${track.channel.title}`
+     : '';
 
-  // Channel
-  npChannel.textContent = track.channel?.title ? `📡 ${track.channel.title}` : '';
+   // YouTube link
+   const ytLink = document.getElementById('yt-link');
+   if (ytLink) {
+     if (track.videoId) {
+       const elapsed = Math.floor(statusData.elapsedSec || 0);
+       ytLink.href = `https://www.youtube.com/watch?v=${track.videoId}&t=${elapsed}`;
+       ytLink.style.display = 'inline';
+       ytLink.title = 'Open on YouTube at current timestamp';
+     } else {
+       ytLink.style.display = 'none';
+     }
+   }
 
   // Thumbnail
   if (track.thumbnailPath) {
@@ -759,7 +788,7 @@ function updatePlaylist() {
         <div class="track-title">${escHtml(track.title || 'Untitled')}</div>
         <div class="track-meta">
           <span>${escHtml(track.author || '')}</span>
-          ${track.channel?.title ? `<span>· ${escHtml(track.channel.title)}</span>` : ''}
+          ${track.channel?.title && track.channel.title !== track.author ? `<span>· ${escHtml(track.channel.title)}</span>` : ''}
         </div>
       </div>
       ${dur ? `<span class="track-duration">${dur}</span>` : ''}

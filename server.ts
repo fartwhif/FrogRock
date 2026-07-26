@@ -386,6 +386,7 @@ let currentTrackData: Track | null = null;
 let currentByteOffset = 0;
 let trackStartTime = Date.now();
 let currentTrackBitrate = 0;
+let currentTrackChannels = 0;
 let currentTrackFileSize = 0;
 let currentFrameSize = 417;
 let currentMetaint = METAIMNT_TARGET;
@@ -446,6 +447,7 @@ function saveCompletedTracks(): void {
 // ====================== FRAME PROBING ======================
 function probeFirstFrames(filePath: string, startOffset: number): {
   bitrate: number;
+  channels: number;
   frameSize: number;
   frames: CodecFrame[];
 } {
@@ -464,9 +466,10 @@ function probeFirstFrames(filePath: string, startOffset: number): {
 
   const header = frames[0].header as MPEGHeader;
   const bitrate = header.bitrate * 1000;
+  const channels = header.channelMode === 'mono' ? 1 : header.channelMode === 'single_channel' ? 1 : 2;
   const frameSize = Math.max(...frames.slice(0, 5).map(f => f.data.length));
 
-  return { bitrate, frameSize, frames };
+  return { bitrate, channels, frameSize, frames };
 }
 
 function computeBurstCapacity(frameSize: number, bitrate: number): number {
@@ -486,6 +489,7 @@ function writeStatus(): void {
     currentTrackIndex: state.currentTrackIndex,
     completedTracks: Array.from(state.completedTracks),
     bitrate: currentTrackBitrate,
+    channels: currentTrackChannels,
     byteOffset: currentByteOffset,
     fileSize: currentTrackFileSize,
     percentage: currentTrackFileSize > 0 ? Math.round((currentByteOffset / currentTrackFileSize) * 10000) / 100 : 0,
@@ -544,8 +548,9 @@ function startCurrentTrack(): void {
   trackStartTime = Date.now();
   currentTrackFileSize = fs.statSync(filePath).size;
 
-  const { bitrate, frameSize, frames: probeFrames } = probeFirstFrames(filePath, startOffset);
+  const { bitrate, channels, frameSize, frames: probeFrames } = probeFirstFrames(filePath, startOffset);
   currentTrackBitrate = bitrate;
+  currentTrackChannels = channels;
   currentFrameSize = frameSize;
 
   // Calculate metaint as a multiple of frame size to avoid splitting MP3 frames
