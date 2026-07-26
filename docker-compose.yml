@@ -4,7 +4,7 @@ services:
     container_name: frogrock
     env_file: .env
     ports:
-      - "${PORT:-8090}:8090"
+      - "38721:8090"
     volumes:
       - "${HOST_CACHE_DIR}:/cache"
     restart: unless-stopped
