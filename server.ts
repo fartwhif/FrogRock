@@ -548,9 +548,9 @@ function startCurrentTrack(): void {
   trackStartTime = Date.now();
   currentTrackFileSize = fs.statSync(filePath).size;
 
-  const { bitrate, channels, frameSize, frames: probeFrames } = probeFirstFrames(filePath, startOffset);
+  const { bitrate, frameSize, frames: probeFrames } = probeFirstFrames(filePath, startOffset);
   currentTrackBitrate = bitrate;
-  currentTrackChannels = channels;
+  currentTrackChannels = 1; // mono
   currentFrameSize = frameSize;
 
   // Calculate metaint as a multiple of frame size to avoid splitting MP3 frames
