@@ -920,6 +920,66 @@ refreshTimer = setInterval(refresh, REFRESH_INTERVAL);
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) refresh();
 });
+
+// ── MediaSession API (car radios, lock screen, media keys) ──────────
+if ('mediaSession' in navigator) {
+  navigator.mediaSession.setActionHandler('play', () => {
+    if (audioEl.paused) togglePlay();
+  });
+  navigator.mediaSession.setActionHandler('pause', () => {
+    if (!audioEl.paused) togglePlay();
+  });
+  navigator.mediaSession.setActionHandler('seekbackward', () => {}); // live stream, no-op
+  navigator.mediaSession.setActionHandler('seekforward', () => {});   // live stream, no-op
+
+  function updateMediaSession() {
+    if (!statusData || !statusData.currentTrack) return;
+    const t = statusData.currentTrack;
+    try {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: t.title || 'FrogRock Radio',
+        artist: t.author || '',
+        album: t.channel?.title || '',
+        artwork: t.thumbnailPath
+          ? [{ src: `/api/thumb?path=${encodeURIComponent(t.thumbnailPath)}`, sizes: '320x180', type: 'image/webp' }]
+          : [],
+      });
+    } catch (e) { /* ignore */ }
+    try {
+      navigator.mediaSession.playbackState = statusData.status === 'playing' ? 'playing' : 'paused';
+    } catch (e) { /* ignore */ }
+  }
+
+  // Patch the refresh loop to update media session metadata
+  const _origRefresh = refresh;
+  refresh = async () => {
+    await _origRefresh();
+    updateMediaSession();
+  };
+}
+
+// ── Keyboard shortcuts (Space=play/pause, Up/Down=volume, Left/Right=seek) ──
+document.addEventListener('keydown', (e) => {
+  // Don't intercept if user is typing in an input
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+  switch (e.code) {
+    case 'Space':
+      e.preventDefault();
+      togglePlay();
+      break;
+    case 'ArrowUp':
+      e.preventDefault();
+      audioEl.volume = Math.min(1, audioEl.volume + 0.05);
+      volumeSlider.value = audioEl.volume;
+      break;
+    case 'ArrowDown':
+      e.preventDefault();
+      audioEl.volume = Math.max(0, audioEl.volume - 0.05);
+      volumeSlider.value = audioEl.volume;
+      break;
+  }
+});
 </script>
 </body>
 </html>
