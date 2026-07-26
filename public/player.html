@@ -793,6 +793,7 @@ const streamUrlEl = document.getElementById('stream-url');
 const copyBtn = document.getElementById('copy-btn');
 const copyLabel = document.getElementById('copy-label');
 
+// Stream served through nginx on same origin (avoids mixed content)
 function getStreamUrl() {
   return window.location.origin + '/stream.mp3';
 }
