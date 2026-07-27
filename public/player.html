@@ -843,16 +843,19 @@ copyBtn.addEventListener('click', () => {
 });
 
 function togglePlay() {
-  if (isPlaying) {
+  if (!audioEl.paused) {
+    // Pause
     intentionalPause = true;
     audioEl.pause();
-    audioEl.src = '';
     isPlaying = false;
     playBtn.innerHTML = '&#9654;';
     statusText.textContent = 'Paused';
     statusText.style.color = 'var(--yellow)';
   } else {
-    audioEl.src = getStreamUrl();
+    // Play
+    if (!audioEl.src) {
+      audioEl.src = getStreamUrl();
+    }
     audioEl.play().then(() => {
       isPlaying = true;
       playBtn.innerHTML = '&#9646;&#9646;';
@@ -924,10 +927,10 @@ document.addEventListener('visibilitychange', () => {
 // ── MediaSession API (car radios, lock screen, media keys) ──────────
 if ('mediaSession' in navigator) {
   navigator.mediaSession.setActionHandler('play', () => {
-    if (audioEl.paused) togglePlay();
+    togglePlay();
   });
   navigator.mediaSession.setActionHandler('pause', () => {
-    if (!audioEl.paused) togglePlay();
+    togglePlay();
   });
   navigator.mediaSession.setActionHandler('seekbackward', () => {}); // live stream, no-op
   navigator.mediaSession.setActionHandler('seekforward', () => {});   // live stream, no-op
