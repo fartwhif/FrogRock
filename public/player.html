@@ -852,7 +852,7 @@ function togglePlay() {
     statusText.textContent = 'Paused';
     statusText.style.color = 'var(--yellow)';
   } else {
-    // Play
+    // Play — set source only once, then just call play()
     if (!audioEl.src) {
       audioEl.src = getStreamUrl();
     }
