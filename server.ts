@@ -104,6 +104,7 @@ interface Track {
   createdAt: string;
   channel: Channel;
   author: string;
+  source?: 'main' | 'grabby';
 }
 
 interface AppState {
@@ -126,8 +127,13 @@ const CACHE_DIR = process.env.CACHE_DIR || 'UNCONFIGURED';
 const INDEX_JSON_PATH = path.join(CACHE_DIR, 'index.json');
 const COMPLETED_TRACKS_PATH = path.join(CACHE_DIR, 'completed.json');
 const STATUS_PATH = path.join(CACHE_DIR, 'status.json');
+const GRABBY_TRACKS_PATH = '/grabby-tracks.json';
 const METAIMNT_TARGET = 16000;
 const MAX_METADATA_LEN = 255;
+
+// Grabby cluster settings
+const GRABBY_MIN_CLUSTER = 1;
+const GRABBY_MAX_CLUSTER = 6;
 
 // Per-client queue settings (Icecast-style backpressure)
 const CLIENT_QUEUE_MAX_BYTES = parseInt(process.env.CLIENT_QUEUE_MAX_BYTES || '65536', 10);
@@ -391,6 +397,97 @@ let currentTrackFileSize = 0;
 let currentFrameSize = 417;
 let currentMetaint = METAIMNT_TARGET;
 
+// ====================== GRABBY TRACK MERGE ======================
+function loadGrabbyTracks(): Track[] {
+  if (!fs.existsSync(GRABBY_TRACKS_PATH)) {
+    return [];
+  }
+  try {
+    const data = fs.readFileSync(GRABBY_TRACKS_PATH, 'utf8');
+    const raw = JSON.parse(data);
+    if (!Array.isArray(raw)) return [];
+
+    return raw.map((g: any) => ({
+      id: `grabby-${g.videoId}`,
+      videoId: g.videoId,
+      channelId: g.channelId || '',
+      title: g.title,
+      description: null,
+      publishedAt: g.publishedAt || '',
+      thumbnailPath: g.thumbnailPath || '',
+      audioPath: g.audioPath || '',
+      subtitlePath: null,
+      watched: false,
+      progress: 0,
+      duration: g.duration || 0,
+      ignored: false,
+      createdAt: g.createdAt || '',
+      channel: {
+        id: '',
+        channelId: g.channelId || '',
+        title: g.author || 'GrabbyTube',
+        order: 0,
+        ignoreScrapeDone: false,
+        createdAt: '',
+      },
+      author: g.author || 'GrabbyTube',
+      source: 'grabby' as const,
+    }));
+  } catch (e) {
+    console.error('Error loading grabby tracks:', e);
+    return [];
+  }
+}
+
+function mixGrabbyTracks(mainPlaylist: Track[], grabbyTracks: Track[]): Track[] {
+  if (grabbyTracks.length === 0 || mainPlaylist.length === 0) return mainPlaylist;
+
+  // Shuffle bag: start with a shuffled copy of grabby tracks
+  let bag = [...grabbyTracks];
+  for (let i = bag.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [bag[i], bag[j]] = [bag[j], bag[i]];
+  }
+  let bagIdx = 0;
+
+  const refillBag = () => {
+    bag = [...grabbyTracks];
+    for (let i = bag.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [bag[i], bag[j]] = [bag[j], bag[i]];
+    }
+    bagIdx = 0;
+  };
+
+  const pullFromBag = (): Track => {
+    if (bagIdx >= bag.length) refillBag();
+    return bag[bagIdx++];
+  };
+
+  // Target ratio: 3 min main : 1 min grabby (3:1 by duration)
+  // After each main track, add grabby tracks equal to 1/3 its duration
+  const merged: Track[] = [];
+
+  for (const mainTrack of mainPlaylist) {
+    merged.push(mainTrack);
+    const mainDur = mainTrack.duration || 0;
+    const grabbyTarget = mainDur / 3; // 3:1 ratio
+
+    if (grabbyTarget > 0) {
+      let clusterDuration = 0;
+      const cluster: Track[] = [];
+      while (clusterDuration < grabbyTarget && cluster.length < GRABBY_MAX_CLUSTER) {
+        const g = pullFromBag();
+        cluster.push(g);
+        clusterDuration += (g.duration || 0);
+      }
+      merged.push(...cluster);
+    }
+  }
+
+  return merged;
+}
+
 // ====================== PLAYLIST MANAGEMENT ======================
 function refreshPlaylist(): void {
   if (!fs.existsSync(INDEX_JSON_PATH)) {
@@ -419,15 +516,33 @@ function refreshPlaylist(): void {
     let newPlaylist: Track[] = [];
     if (Array.isArray(index)) {
       newPlaylist = index
-        .filter((item): item is Track => Boolean(item && item.audioPath));
+        .filter((item): item is Track => Boolean(item && item.audioPath))
+        .map((t: Track) => ({ ...t, source: 'main' as const }));
+    }
+
+    // Merge grabby tracks
+    const grabbyTracks = loadGrabbyTracks();
+    const mergedPlaylist = mixGrabbyTracks(newPlaylist, grabbyTracks);
+
+    // Preserve current track index — find current track by ID in new playlist
+    let newIndex = state.currentTrackIndex;
+    const playingId = currentTrackData?.id;
+    if (playingId) {
+      const found = mergedPlaylist.findIndex(t => t.id === playingId);
+      if (found !== -1) {
+        newIndex = found;
+      }
     }
 
     updateState({
-      playlist: newPlaylist,
+      playlist: mergedPlaylist,
+      currentTrackIndex: newIndex,
       completedTracks: newCompleted,
     });
 
-    console.log(`Playlist refreshed — ${newPlaylist.length} tracks`);
+    const mainCount = newPlaylist.length;
+    const grabbyCount = mergedPlaylist.length - mainCount;
+    console.log(`Playlist refreshed — ${mainCount} main + ${grabbyCount} grabby = ${mergedPlaylist.length} total`);
   } catch (error) {
     console.error('Error reading index file:', error);
   }
@@ -556,6 +671,13 @@ function startCurrentTrack(): void {
   // Calculate metaint as a multiple of frame size to avoid splitting MP3 frames
   const framesPerMeta = Math.round(METAIMNT_TARGET / frameSize);
   currentMetaint = framesPerMeta * frameSize;
+
+  // Push new metaint to existing ICY writers so metadata stays frame-aligned
+  for (const client of manifold.clients) {
+    if (client.writer) {
+      client.writer.metaint = currentMetaint;
+    }
+  }
 
   const burstCapacityFrames = computeBurstCapacity(currentFrameSize, currentTrackBitrate);
   audioBuffer = new BurstBuffer(burstCapacityFrames);
@@ -851,6 +973,7 @@ const server = http.createServer((req: http.IncomingMessage, res: http.ServerRes
       duration: t.duration,
       thumbnailPath: t.thumbnailPath,
       channel: t.channel ? { title: t.channel.title } : null,
+      source: t.source || 'main',
       completed: state.completedTracks.has(t.id),
     }));
     const payload = {
