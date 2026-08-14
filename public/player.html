@@ -796,12 +796,6 @@ function updatePlaylist() {
   });
 
   playlistList.innerHTML = html;
-
-  // Scroll current into view
-  if (currentIdx >= 0) {
-    const currentEl = playlistList.querySelector('.current');
-    if (currentEl) currentEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-  }
 }
 
 function updateListeners() {
