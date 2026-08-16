@@ -517,18 +517,6 @@
     .listeners span:not(.dot) { display: none; }
   }
 
-  /* Grabby badge */
-  .grabby-badge {
-    font-size: 9px;
-    font-weight: 700;
-    background: var(--yellow);
-    color: var(--bg);
-    padding: 1px 5px;
-    border-radius: 3px;
-    margin-left: 6px;
-    vertical-align: middle;
-    letter-spacing: 0.5px;
-  }
 
 </style>
 </head>
@@ -668,7 +656,7 @@ async function fetchStatus() {
   } catch(e) { /* ignore */ }
 }
 
-// Fetch playlist from /api/playlist (merged main + grabby)
+// Fetch playlist from /api/playlist
 async function fetchPlaylist() {
   try {
     const r = await fetch(API_BASE + '/api/playlist');
@@ -712,11 +700,15 @@ function updateNowPlaying() {
     statusText.style.color = 'var(--text2)';
   }
 
-  // Bitrate + channel info
+  // Bitrate + channel info + sample rate
   if (statusData.bitrate) {
     const kbps = Math.round(statusData.bitrate / 1000);
-    const ch = statusData.channels === 1 ? ' mono' : statusData.channels === 2 ? ' stereo' : '';
-    bitrateBadge.textContent = kbps + ' kbps' + ch;
+    const ch = statusData.channels === 1 ? 'mono' : statusData.channels === 2 ? 'stereo' : '';
+    const sr = statusData.sampleRate ? `${(statusData.sampleRate / 1000).toFixed(1)}kHz` : '';
+    const parts = [`${kbps} kbps`];
+    if (ch) parts.push(ch);
+    if (sr) parts.push(sr);
+    bitrateBadge.textContent = parts.join(' ');
   }
 
   if (!track) {
@@ -798,7 +790,6 @@ function updatePlaylist() {
       : '';
 
     const dur = track.duration ? fmt(track.duration) : '';
-    const isGrabby = track.source === 'grabby';
 
     html += `<div class="${cls}">
       <span class="track-num">${isCurrent ? '▶' : (i + 1)}</span>
@@ -806,7 +797,7 @@ function updatePlaylist() {
         ${thumbSrc ? `<img src="${thumbSrc}" alt="" loading="lazy" onerror="this.style.display='none'">` : ''}
       </div>
       <div class="track-info">
-        <div class="track-title">${escHtml(track.title || 'Untitled')}${isGrabby ? ' <span class="grabby-badge">G</span>' : ''}</div>
+        <div class="track-title">${escHtml(track.title || 'Untitled')}</div>
         <div class="track-meta">
           <span>${escHtml(track.author || '')}</span>
           ${track.channel?.title && track.channel.title !== track.author ? `<span>· ${escHtml(track.channel.title)}</span>` : ''}
