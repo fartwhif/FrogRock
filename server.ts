@@ -104,7 +104,7 @@ interface Track {
   createdAt: string;
   channel: Channel;
   author: string;
-  source?: 'main' | 'grabby';
+  source?: 'main';
 }
 
 interface AppState {
@@ -127,13 +127,8 @@ const CACHE_DIR = process.env.CACHE_DIR || 'UNCONFIGURED';
 const INDEX_JSON_PATH = path.join(CACHE_DIR, 'index.json');
 const COMPLETED_TRACKS_PATH = path.join(CACHE_DIR, 'completed.json');
 const STATUS_PATH = path.join(CACHE_DIR, 'status.json');
-const GRABBY_TRACKS_PATH = '/grabby-tracks.json';
 const METAIMNT_TARGET = 16000;
 const MAX_METADATA_LEN = 255;
-
-// Grabby cluster settings
-const GRABBY_MIN_CLUSTER = 1;
-const GRABBY_MAX_CLUSTER = 6;
 
 // Per-client queue settings (Icecast-style backpressure)
 const CLIENT_QUEUE_MAX_BYTES = parseInt(process.env.CLIENT_QUEUE_MAX_BYTES || '65536', 10);
@@ -393,99 +388,19 @@ let currentByteOffset = 0;
 let trackStartTime = Date.now();
 let currentTrackBitrate = 0;
 let currentTrackChannels = 0;
+let currentTrackSampleRate = 0;
 let currentTrackFileSize = 0;
 let currentFrameSize = 417;
 let currentMetaint = METAIMNT_TARGET;
 
-// ====================== GRABBY TRACK MERGE ======================
-function loadGrabbyTracks(): Track[] {
-  if (!fs.existsSync(GRABBY_TRACKS_PATH)) {
-    return [];
+// ====================== PATH NORMALIZATION ======================
+// Upstream index.json may use absolute paths (/cache/...) or relative paths.
+// Normalize to relative (relative to CACHE_DIR) for consistent resolution.
+function normalizePath(p: string): string {
+  if (p.startsWith('/cache/')) {
+    return p.slice(7); // strip /cache/ prefix
   }
-  try {
-    const data = fs.readFileSync(GRABBY_TRACKS_PATH, 'utf8');
-    const raw = JSON.parse(data);
-    if (!Array.isArray(raw)) return [];
-
-    return raw.map((g: any) => ({
-      id: `grabby-${g.videoId}`,
-      videoId: g.videoId,
-      channelId: g.channelId || '',
-      title: g.title,
-      description: null,
-      publishedAt: g.publishedAt || '',
-      thumbnailPath: g.thumbnailPath || '',
-      audioPath: g.audioPath || '',
-      subtitlePath: null,
-      watched: false,
-      progress: 0,
-      duration: g.duration || 0,
-      ignored: false,
-      createdAt: g.createdAt || '',
-      channel: {
-        id: '',
-        channelId: g.channelId || '',
-        title: g.author || 'GrabbyTube',
-        order: 0,
-        ignoreScrapeDone: false,
-        createdAt: '',
-      },
-      author: g.author || 'GrabbyTube',
-      source: 'grabby' as const,
-    }));
-  } catch (e) {
-    console.error('Error loading grabby tracks:', e);
-    return [];
-  }
-}
-
-function mixGrabbyTracks(mainPlaylist: Track[], grabbyTracks: Track[]): Track[] {
-  if (grabbyTracks.length === 0 || mainPlaylist.length === 0) return mainPlaylist;
-
-  // Shuffle bag: start with a shuffled copy of grabby tracks
-  let bag = [...grabbyTracks];
-  for (let i = bag.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [bag[i], bag[j]] = [bag[j], bag[i]];
-  }
-  let bagIdx = 0;
-
-  const refillBag = () => {
-    bag = [...grabbyTracks];
-    for (let i = bag.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [bag[i], bag[j]] = [bag[j], bag[i]];
-    }
-    bagIdx = 0;
-  };
-
-  const pullFromBag = (): Track => {
-    if (bagIdx >= bag.length) refillBag();
-    return bag[bagIdx++];
-  };
-
-  // Target ratio: 3 min main : 1 min grabby (3:1 by duration)
-  // After each main track, add grabby tracks equal to 1/3 its duration
-  const merged: Track[] = [];
-
-  for (const mainTrack of mainPlaylist) {
-    merged.push(mainTrack);
-    const mainDur = mainTrack.duration || 0;
-    const grabbyTarget = mainDur / 3; // 3:1 ratio
-
-    if (grabbyTarget > 0) {
-      let clusterDuration = 0;
-      const cluster: Track[] = [];
-      while (clusterDuration < grabbyTarget && cluster.length < GRABBY_MAX_CLUSTER) {
-        const g = pullFromBag();
-        cluster.push(g);
-        clusterDuration += (g.duration || 0);
-      }
-      merged.push(...cluster);
-    }
-  }
-
-  return merged;
+  return p;
 }
 
 // ====================== PLAYLIST MANAGEMENT ======================
@@ -517,32 +432,31 @@ function refreshPlaylist(): void {
     if (Array.isArray(index)) {
       newPlaylist = index
         .filter((item): item is Track => Boolean(item && item.audioPath))
-        .map((t: Track) => ({ ...t, source: 'main' as const }));
+        .map((t: Track) => ({
+          ...t,
+          source: 'main' as const,
+          audioPath: normalizePath(t.audioPath),
+          thumbnailPath: normalizePath(t.thumbnailPath),
+        }));
     }
-
-    // Merge grabby tracks
-    const grabbyTracks = loadGrabbyTracks();
-    const mergedPlaylist = mixGrabbyTracks(newPlaylist, grabbyTracks);
 
     // Preserve current track index — find current track by ID in new playlist
     let newIndex = state.currentTrackIndex;
     const playingId = currentTrackData?.id;
     if (playingId) {
-      const found = mergedPlaylist.findIndex(t => t.id === playingId);
+      const found = newPlaylist.findIndex(t => t.id === playingId);
       if (found !== -1) {
         newIndex = found;
       }
     }
 
     updateState({
-      playlist: mergedPlaylist,
+      playlist: newPlaylist,
       currentTrackIndex: newIndex,
       completedTracks: newCompleted,
     });
 
-    const mainCount = newPlaylist.length;
-    const grabbyCount = mergedPlaylist.length - mainCount;
-    console.log(`Playlist refreshed — ${mainCount} main + ${grabbyCount} grabby = ${mergedPlaylist.length} total`);
+    console.log(`Playlist refreshed — ${newPlaylist.length} tracks`);
   } catch (error) {
     console.error('Error reading index file:', error);
   }
@@ -563,6 +477,7 @@ function saveCompletedTracks(): void {
 function probeFirstFrames(filePath: string, startOffset: number): {
   bitrate: number;
   channels: number;
+  sampleRate: number;
   frameSize: number;
   frames: CodecFrame[];
 } {
@@ -582,9 +497,10 @@ function probeFirstFrames(filePath: string, startOffset: number): {
   const header = frames[0].header as MPEGHeader;
   const bitrate = header.bitrate * 1000;
   const channels = header.channelMode === 'mono' ? 1 : header.channelMode === 'single_channel' ? 1 : 2;
+  const sampleRate = header.sampleRate;
   const frameSize = Math.max(...frames.slice(0, 5).map(f => f.data.length));
 
-  return { bitrate, channels, frameSize, frames };
+  return { bitrate, channels, sampleRate, frameSize, frames };
 }
 
 function computeBurstCapacity(frameSize: number, bitrate: number): number {
@@ -605,6 +521,7 @@ function writeStatus(): void {
     completedTracks: Array.from(state.completedTracks),
     bitrate: currentTrackBitrate,
     channels: currentTrackChannels,
+    sampleRate: currentTrackSampleRate,
     byteOffset: currentByteOffset,
     fileSize: currentTrackFileSize,
     percentage: currentTrackFileSize > 0 ? Math.round((currentByteOffset / currentTrackFileSize) * 10000) / 100 : 0,
@@ -663,9 +580,10 @@ function startCurrentTrack(): void {
   trackStartTime = Date.now();
   currentTrackFileSize = fs.statSync(filePath).size;
 
-  const { bitrate, frameSize, frames: probeFrames } = probeFirstFrames(filePath, startOffset);
+  const { bitrate, channels, sampleRate, frameSize, frames: probeFrames } = probeFirstFrames(filePath, startOffset);
   currentTrackBitrate = bitrate;
-  currentTrackChannels = 1; // mono
+  currentTrackChannels = channels;
+  currentTrackSampleRate = sampleRate;
   currentFrameSize = frameSize;
 
   // Calculate metaint as a multiple of frame size to avoid splitting MP3 frames
@@ -935,6 +853,8 @@ const server = http.createServer((req: http.IncomingMessage, res: http.ServerRes
       currentTrack: currentTrackData,
       currentTrackIndex: state.currentTrackIndex,
       bitrate: currentTrackBitrate,
+      channels: currentTrackChannels,
+      sampleRate: currentTrackSampleRate,
       byteOffset: currentByteOffset,
       fileSize: currentTrackFileSize,
       percentage: currentTrackFileSize > 0 ? Math.round((currentByteOffset / currentTrackFileSize) * 10000) / 100 : 0,
