@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wireguard \
     iproute2 \
     sudo \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -r appgroup && useradd -r -g appgroup -d /app -s /sbin/nologin appuser \
     && mkdir -p /etc/wireguard
