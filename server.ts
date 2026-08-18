@@ -11,8 +11,38 @@ import 'dotenv/config';
 import http from 'http';
 import fs from 'fs';
 import path from 'path';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import CodecParser, { CodecFrame, MPEGHeader } from 'codec-parser';
 import { Writer } from './src/icy-writer';
+
+const execFileAsync = promisify(execFile);
+
+/** Use ffprobe as ground truth for audio properties (MP3 header can lie about downmixed audio). */
+async function probeAudioProps(filePath: string): Promise<{ bitrate: number; channels: number; sampleRate: number }> {
+  try {
+    const { stdout } = await execFileAsync('ffprobe', [
+      '-v', 'error',
+      '-select_streams', 'a:0',
+      '-show_entries', 'stream=bit_rate',
+      '-show_entries', 'stream=channels',
+      '-show_entries', 'stream=sample_rate',
+      '-of', 'default=noprint_wrappers=1',
+      filePath
+    ]);
+    const parse = (key: string): number => {
+      const m = stdout.match(new RegExp(`${key}=(\\d+)`));
+      return m ? parseInt(m[1], 10) : 0;
+    };
+    return {
+      bitrate: parse('bit_rate'),
+      channels: parse('channels') || 2,
+      sampleRate: parse('sample_rate'),
+    };
+  } catch {
+    return { bitrate: 0, channels: 2, sampleRate: 0 };
+  }
+}
 
 // Whitelist of known ICY/Shoutcast-compatible players.
 // Only these clients receive ICY metadata blocks. All other clients
@@ -540,7 +570,7 @@ function writeStatus(): void {
 }
 
 // ====================== BROADCAST STREAMING ======================
-function startCurrentTrack(): void {
+async function startCurrentTrack(): Promise<void> {
   if (isPlaying) {
     isPlaying = false;
   }
@@ -580,10 +610,14 @@ function startCurrentTrack(): void {
   trackStartTime = Date.now();
   currentTrackFileSize = fs.statSync(filePath).size;
 
-  const { bitrate, channels, sampleRate, frameSize, frames: probeFrames } = probeFirstFrames(filePath, startOffset);
+  // Ground truth for UI display (bitrate, channels, sampleRate)
+  const { bitrate, channels, sampleRate } = await probeAudioProps(filePath);
   currentTrackBitrate = bitrate;
   currentTrackChannels = channels;
   currentTrackSampleRate = sampleRate;
+
+  // codec-parser only for frameSize (internal stream pacing)
+  const { frameSize, frames: probeFrames } = probeFirstFrames(filePath, startOffset);
   currentFrameSize = frameSize;
 
   // Calculate metaint as a multiple of frame size to avoid splitting MP3 frames
@@ -721,7 +755,9 @@ function advanceToNextTrack(): void {
     currentTrackStartTime: Date.now(),
   });
 
-  startCurrentTrack();
+  startCurrentTrack().catch((err: Error) => {
+    console.error('startCurrentTrack error:', err.message);
+  });
 }
 
 // ====================== MIME TYPES ======================
@@ -836,7 +872,9 @@ const server = http.createServer((req: http.IncomingMessage, res: http.ServerRes
     res.on('close', cleanup);
 
     if (!isPlaying && state.playlist.length > 0) {
-      startCurrentTrack();
+      startCurrentTrack().catch((err: Error) => {
+        console.error('startCurrentTrack error:', err.message);
+      });
     }
     return;
   }
@@ -969,7 +1007,9 @@ server.listen(PORT, () => {
 
   setTimeout(() => {
     if (state.playlist.length > 0 && !isPlaying) {
-      startCurrentTrack();
+      startCurrentTrack().catch((err: Error) => {
+        console.error('startCurrentTrack error:', err.message);
+      });
     }
   }, 500);
 
