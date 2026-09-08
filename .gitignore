@@ -6,4 +6,21 @@
 node_modules/
 dist/
 *.log
+dnas/sc_serv
+dnas/sc_serv2.conf
+dnas/dnas.env
+dnas/data/
+dnas/data-test/
+dnas/sc_serv2_linux_x64.tar.gz
+# vendor DNAS distribution (docs/examples/setup) — not ours
+dnas/DNAS_Server_Changelog.html
+dnas/Readme_DNAS_Server.html
+dnas/cacert.pem
+dnas/control/
+dnas/docs/
+dnas/examples/
+dnas/logs/
+dnas/setup/
+dnas/setup.sh
+dnas/tos.txt
 *.pid

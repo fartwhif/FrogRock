@@ -12,3 +12,44 @@ services:
       - NET_ADMIN
     sysctls:
       - net.ipv4.conf.all.src_valid_mark=1
+
+  shoutcast-dnas:
+    build:
+      context: .
+      dockerfile: dnas/Dockerfile
+    image: frogrock-dnas:2.6.1
+    container_name: shoutcast-dnas
+    env_file: ./dnas/dnas.env
+    networks:
+      frogrock_net:
+        ipv4_address: 172.35.0.20
+    volumes:
+      - ./dnas/sc_serv2.conf:/opt/sc_serv2/sc_serv2.conf:ro
+      - ./dnas/data:/opt/sc_serv2/data
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1
+
+  stream-fix:
+    build:
+      context: ./dnas/stream-fix
+    image: frogrock-streamfix:1.0
+    container_name: stream-fix
+    restart: unless-stopped
+    environment:
+      - UPSTREAM_HOST=frogrock
+      - UPSTREAM_PORT=8090
+    ports:
+      - "127.0.0.1:18301:8091"
+    networks:
+      frogrock_net:
+        ipv4_address: 172.35.0.30
+
+networks:
+  frogrock_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.35.0.0/16

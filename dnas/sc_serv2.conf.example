@@ -1,0 +1,49 @@
+; FrogRock → Shoutcast DNAS v2.6.1 (relay mode)
+; Relative paths resolve against CWD (/opt/sc_serv2 — see Dockerfile WORKDIR)
+; Copy to dnas/sc_serv2.conf (gitignored) and fill in the secrets.
+
+logfile=data/sc_serv.log
+w3clog=data/sc_w3c.log
+banfile=data/sc_serv.ban
+ripfile=data/sc_serv.rip
+
+; Required even in relay-only mode (DNAS aborts at startup without it)
+password=__SOURCE_PASSWORD__
+adminpassword=__ADMIN_PASSWORD__
+; Internal port. Public listeners/YP see 38.83.114.18:8000 (gthost nginx → this port)
+portbase=8100
+
+; DNAS sits behind NAT on this machine: report the PUBLIC (gthost) URL to YP
+; and listener playlists, not the private bridge/WG address. publicip has no
+; binding effect (do NOT set destip to a non-local IP — DNAS tries to bind it).
+publicip=38.83.114.18
+publicport=8000
+
+requirestreamconfigs=1
+; 481 if YP's tester arrives when slots are full
+maxuser=100
+
+; --- stream 1: relay of frogrock via stream-fix (normalization shim) ---
+; DNAS's relay client emits a header name with spaces that both nginx and
+; Node 400 on; stream-fix rewrites it and forces close-delimited framing.
+streamid_1=1
+streampath_1=/radio
+streamrelayurl_1=http://stream-fix:8091/stream.mp3
+; (manual host-side tests use http://127.0.0.1:18301/stream.mp3 — stream-fix's loopback publish)
+
+; explicit defaults: retry pulling frogrock forever, every 5 s
+relayreconnecttime=5
+relayconnectretries=0
+
+; keep trying to get/keep the listing even after YP hiccups
+publicserver=always
+streampublicserver_1=always
+; 32-char GUID from Radio Manager (empty = not listed; fill in, then reload via
+; admin.cgi?mode=reload — no restart needed)
+streamauthhash_1=__STATION_AUTHHASH__
+
+; restrict private admin pages (incl. updinfo) to the compose net + loopback
+adminfile=data/sc_serv.admin
+
+; No bitrate options on purpose: the stream is 64 kbps mono; min/max set to 128k
+; triggers YP error 471 and single-attempt relay give-up.
