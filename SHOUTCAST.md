@@ -137,6 +137,44 @@ frames.
 recreate, no WG change), and the stream registered **public** on the Shoutcast
 directory (stnid 99629247; see above). Inbound `8000/tcp` was already open via
 nftables (point 10; no DO security-group change needed).
+
+**12. Web player fix — dual-mode `:8000` (plain + TLS) on gthost
+(2026-09-08).** The directory.shoutcast.com web player refused to play.
+Root cause: YP stores `http://38.83.114.18:8000/radio?icy=https` (raw IP —
+`?icy=https` is appended by YP, not us), and Chrome auto-upgrades http media
+subresources on https pages to https; a raw-IP URL can never present a
+valid certificate, so the upgraded fetch died (verified: ffprobe decodes the
+stream bytes fine — the bytes were never the problem). Working comparison
+stations use a *domain* URL whose host serves TLS.
+Fix: gthost `:8000` is now dual-mode via an nginx `stream` block +
+`ssl_preread` (new `nginx-mod-stream` package): TLS ClientHello →
+`127.0.0.1:8443` (TLS-terminating proxy, valid `frogrock.esfbc.com` LE cert),
+plain → `127.0.0.1:8101`; both proxy to `192.168.0.241:8100` with the
+streaming-tuned settings (`proxy_buffering off`, no chunked, icy-*
+`proxy_pass_header`, 1 h timeouts). `proxy_protocol` on both hops keeps DNAS's
+listener list / banfile seeing real client IPs (verified by tcpdump:
+`PROXY TCP4 <real client ip> 38.83.114.18 …`). Tracked:
+`dnas/gthost-dnas-stream.conf` (new), `dnas/gthost-dnas-nginx.conf` (replaced
+the old single `:8000` http block).
+Findings: (a) DNAS 2.6.1 accepts a hostname in `publicip` (2.5.5+ feature)
+but **resolves it to the IP** for the YP/playlist URL — live config is
+`publicip=frogrock.esfbc.com`, yet YP still stores
+`http://38.83.114.18:8000/radio` (proven with a faked in-container
+`/etc/hosts` entry). A domain therefore cannot get into YP via DNAS; the
+web player now plays because the dual-mode port serves the raw-IP URL in
+plain HTTP (and TLS for the auto-upgrade of the domain form
+`https://frogrock.esfbc.com:8000/radio`). (b) On RHEL10 nginx 1.26.3
+(`nginx-mod-stream`), `$ssl_preread_protocol` did **not** match literal map
+keys (`TLSv1`…`TLSv1_3` never matched — verified empirically); the routing
+map uses a catch-all regex key (`~.` = any non-empty value = ClientHello
+seen; plain connections yield the empty string). (c) Plain HTTP on the
+registered port must stay up: YP's reachability tester, Winamp, and the
+Shoutcast mobile app use it.
+Verified: `curl -sI` plain (raw IP and domain) → 200 `audio/mpeg` with icy-*
+headers; `https://frogrock.esfbc.com:8000/radio` → 200, cert validates
+against system CAs; user-confirmed the directory web player plays
+(2026-09-08).
+
 **Open (needs user confirmation):** is the authhash / "FrogRock Radio" station
 the final station, or a throwaway test? If it's the final one, the listing is
 complete as-is.

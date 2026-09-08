@@ -16,7 +16,11 @@ portbase=8100
 ; DNAS sits behind NAT on this machine: report the PUBLIC (gthost) URL to YP
 ; and listener playlists, not the private bridge/WG address. publicip has no
 ; binding effect (do NOT set destip to a non-local IP — DNAS tries to bind it).
-publicip=38.83.114.18
+; Hostnames are accepted (DNAS 2.5.5+) but DNAS RESOLVES them to the IP for
+; the YP/playlist URL, so the public URL stays the raw IP either way.
+; gthost's :8000 is dual-mode (plain + TLS, see dnas/gthost-dnas-stream.conf)
+; so browsers that auto-upgrade http->https get the valid frogrock cert.
+publicip=frogrock.esfbc.com
 publicport=8000
 
 requirestreamconfigs=1
