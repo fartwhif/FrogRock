@@ -73,10 +73,17 @@ Titles flow automatically — no code change, no FrogRock image rebuild/redeploy
 (A manual `admin.cgi?mode=updinfo` still works but is overwritten by the relay's
 own metadata within ~2 s, proving the relay metadata is the active source.)
 
-**7. FrogRock attached to `frogrock_net` via
-`docker network connect --ip 172.35.0.10 frogrock_frogrock_net frogrock`** —
-additive, no restart (it keeps 172.20.0.2 on its default net). The frogrock
-compose service definition is unchanged.
+**7. FrogRock attached to `frogrock_net` — declarative in compose
+(2026-09-09).** Originally attached ad hoc via
+`docker network connect --ip 172.35.0.10 frogrock_frogrock_net frogrock`
+(additive, no restart; keeps 172.20.0.2 on its default net). Pitfall found:
+any `docker compose up -d frogrock` **recreate silently detaches** that
+manual connection — DNAS's relay then loses its source and the YP URL
+answers 401 "currently unavailable" (DNAS's no-stream response) while the
+frogrock stream itself is fine. Fix: the attachment is now declared on the
+frogrock compose service (`networks: frogrock_net: ipv4_address: 172.35.0.10`),
+so recreates converge on the same two-network state (default + pinned
+`frogrock_net`).
 
 **8. Docker Desktop VM topology.** This WSL2 shell does not share a netns with
 the Docker daemon (it runs in Docker Desktop's Linux VM). Container IPs are not
