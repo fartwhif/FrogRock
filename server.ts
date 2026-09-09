@@ -167,6 +167,18 @@ const CLIENT_LAG_MAX_MS = parseInt(process.env.CLIENT_LAG_MAX_MS || '10000', 10)
 // Burst buffer for new-client prebuffering (duration in seconds, resized per track)
 const BURST_DURATION_SEC = parseInt(process.env.BURST_DURATION_SEC || '8', 10);
 
+// ====================== SHOUTCAST DIRECTORY ======================
+// The Shoutcast directory (directory.shoutcast.com) lists our station. We poll
+// the directory's own search endpoint + tunein playlist (the same endpoints the
+// directory web UI calls) and probe the registered stream URL — the same check
+// Shoutcast's reachability monitor performs — to determine whether the listing
+// is UP. The web UI card is shown only while that is true.
+const SHOUTCAST_QUERY = process.env.SHOUTCAST_QUERY || 'FrogRock';
+const SHOUTCAST_STATION_NAME = process.env.SHOUTCAST_STATION_NAME || 'FrogRock Radio';
+const SHOUTCAST_SEARCH_URL = `https://directory.shoutcast.com/Search?query=${encodeURIComponent(SHOUTCAST_QUERY)}`;
+const SHOUTCAST_POLL_MS = parseInt(process.env.SHOUTCAST_POLL_MS || '60000', 10);
+const SHOUTCAST_HTTP_TIMEOUT_MS = 15000;
+
 // ====================== STARTUP CHECKS ======================
 if (CACHE_DIR === 'UNCONFIGURED') {
   console.error('ERROR: CACHE_DIR environment variable is not set.');
@@ -816,6 +828,149 @@ function serveThumb(res: http.ServerResponse, relPath: string): void {
   res.end(data);
 }
 
+// ====================== SHOUTCAST LISTING STATUS (server-poll cache) ======================
+interface ShoutcastStatus {
+  up: boolean;
+  streamUrl: string;
+  searchUrl: string;
+  stationName: string;
+  checkedAt: string;
+}
+
+let shoutcastStatus: ShoutcastStatus = {
+  up: false,
+  streamUrl: '',
+  searchUrl: SHOUTCAST_SEARCH_URL,
+  stationName: SHOUTCAST_STATION_NAME,
+  checkedAt: '',
+};
+
+interface ShoutcastSearchStation {
+  ID: number;
+  Name: string;
+  StreamUrl?: string | null;
+  [key: string]: unknown;
+}
+
+/** Directory web-UI search endpoint (POST, form-encoded) — the same call directory.shoutcast.com/Search makes. */
+async function shoutcastSearchStations(): Promise<ShoutcastSearchStation[]> {
+  const res = await fetch('https://directory.shoutcast.com/Search/UpdateSearch', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'X-Requested-With': 'XMLHttpRequest',
+    },
+    body: `query=${encodeURIComponent(SHOUTCAST_QUERY)}`,
+    signal: AbortSignal.timeout(SHOUTCAST_HTTP_TIMEOUT_MS),
+  });
+  if (!res.ok) throw new Error(`search HTTP ${res.status}`);
+  return (await res.json()) as ShoutcastSearchStation[];
+}
+
+/** Directory tunein playlist (what players get) — yields the shoutcast stream URL. */
+async function shoutcastTuneinUrl(stationId: number): Promise<string> {
+  const res = await fetch(`http://yp.shoutcast.com/sbin/tunein-station.pls?id=${stationId}`, {
+    signal: AbortSignal.timeout(SHOUTCAST_HTTP_TIMEOUT_MS),
+  });
+  if (!res.ok) throw new Error(`tunein HTTP ${res.status}`);
+  const m = (await res.text()).match(/^File1=(.+)$/m);
+  return m ? m[1].trim() : '';
+}
+
+/** Directory web-player stream URL (fallback for the tunein playlist). Response is a JSON-encoded string. */
+async function shoutcastPlayerStreamUrl(stationId: number): Promise<string> {
+  const res = await fetch('https://directory.shoutcast.com/Player/GetStreamUrl', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'X-Requested-With': 'XMLHttpRequest',
+    },
+    body: `station=${stationId}`,
+    signal: AbortSignal.timeout(SHOUTCAST_HTTP_TIMEOUT_MS),
+  });
+  if (!res.ok) throw new Error(`GetStreamUrl HTTP ${res.status}`);
+  const text = (await res.text()).trim();
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return typeof parsed === 'string' ? parsed : '';
+  } catch {
+    return text;
+  }
+}
+
+/**
+ * Playability probe: does the shoutcast-registered stream URL serve live audio?
+ *
+ * Mirrors the directory's own reachability check — YP's tester, Winamp, and the
+ * Shoutcast mobile app all connect to the stored URL directly. Our listing
+ * stores a raw-IP http:// URL (a raw-IP URL can never present a valid
+ * certificate), so plain HTTP is the listener path: gthost :8000 is dual-mode
+ * (plain + TLS, SHOUTCAST.md point 12) and the directory's web player plays
+ * the domain form via http→https auto-upgrade. https URLs are still checked
+ * for a valid TLS chain, exactly as a browser would.
+ */
+async function shoutcastStreamIsLive(url: string): Promise<boolean> {
+  if (!/^https?:/i.test(url)) return false;
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
+    if (!res.ok || !res.body) return false;
+    const ctype = res.headers.get('content-type') || '';
+    if (!/audio|mpeg|octet-stream/i.test(ctype)) return false;
+    // A single TCP read can be tiny; accumulate real audio bytes before deciding.
+    const reader = res.body.getReader();
+    let received = 0;
+    const deadline = Date.now() + 8000;
+    while (received < 4096 && Date.now() < deadline) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      received += chunk.value?.byteLength ?? 0;
+    }
+    await res.body.cancel().catch(() => {});
+    return received >= 4096;
+  } catch {
+    return false;
+  }
+}
+
+/** One poll cycle: search the directory, resolve the stream URL, probe it. */
+async function pollShoutcast(): Promise<void> {
+  const result: ShoutcastStatus = {
+    up: false,
+    streamUrl: '',
+    searchUrl: SHOUTCAST_SEARCH_URL,
+    stationName: SHOUTCAST_STATION_NAME,
+    checkedAt: new Date().toISOString(),
+  };
+  try {
+    const stations = await shoutcastSearchStations();
+    const station = stations.find(
+      (s) => typeof s?.Name === 'string' && s.Name.toLowerCase() === SHOUTCAST_STATION_NAME.toLowerCase()
+    );
+    if (!station) {
+      console.log(`[shoutcast] "${SHOUTCAST_STATION_NAME}" not found in directory search results`);
+    } else {
+      result.stationName = station.Name;
+      let streamUrl = '';
+      try {
+        streamUrl = await shoutcastTuneinUrl(station.ID);
+      } catch { /* fall through to web-player URL */ }
+      if (!streamUrl) {
+        try {
+          streamUrl = await shoutcastPlayerStreamUrl(station.ID);
+        } catch { /* leave empty */ }
+      }
+      result.streamUrl = streamUrl;
+      if (streamUrl && (await shoutcastStreamIsLive(streamUrl))) {
+        result.up = true;
+      }
+      console.log(`[shoutcast] listed="${station.Name}" streamUrl="${streamUrl}" up=${result.up}`);
+    }
+  } catch (err) {
+    console.error(`[shoutcast] poll failed: ${(err as Error).message}`);
+  }
+  shoutcastStatus = result;
+}
+
 // ====================== HTTP SERVER ======================
 const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   const url = req.url || '/';
@@ -953,6 +1108,17 @@ const server = http.createServer((req: http.IncomingMessage, res: http.ServerRes
     return;
   }
 
+  // API: Shoutcast listing status (server-poll cache; drives the UI card)
+  if (pathPart === '/api/shoutcast') {
+    res.writeHead(200, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      'Access-Control-Allow-Origin': '*',
+    });
+    res.end(JSON.stringify(shoutcastStatus));
+    return;
+  }
+
   // API: Thumbnail
   if (pathPart === '/api/thumb') {
     const thumbPath = params.get('path');
@@ -1004,6 +1170,10 @@ server.listen(PORT, () => {
   console.log(`  → Slow clients are dropped automatically`);
 
   refreshPlaylist();
+
+  // Shoutcast listing status: first poll now, then every SHOUTCAST_POLL_MS
+  pollShoutcast();
+  setInterval(pollShoutcast, SHOUTCAST_POLL_MS);
 
   setTimeout(() => {
     if (state.playlist.length > 0 && !isPlaying) {

@@ -348,6 +348,66 @@
     color: var(--green);
   }
 
+  /* Shoutcast Directory card — always visible; the status dot tracks the live listing */
+
+  .shoutcast-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .shoutcast-icon {
+    height: 24px;
+    width: auto;
+    border-radius: 4px;
+  }
+
+  .shoutcast-status {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1.2px;
+    color: var(--green);
+  }
+
+  .shoutcast-status .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 6px var(--green);
+    animation: pulse 2s infinite;
+  }
+
+  .shoutcast-status.down {
+    color: var(--red);
+  }
+
+  .shoutcast-status.down .dot {
+    background: var(--red);
+    box-shadow: 0 0 6px var(--red);
+    animation: none;
+  }
+
+  .shoutcast-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 10px;
+    font-size: 13px;
+    color: var(--accent);
+    text-decoration: none;
+  }
+
+  .shoutcast-link:hover {
+    text-decoration: underline;
+  }
+
+
   /* Bitrate badge */
   .bitrate-badge {
     font-size: 11px;
@@ -582,6 +642,25 @@
       <button class="copy-btn" id="copy-btn" title="Copy to clipboard">
         <span id="copy-icon">&#128203;</span>
         <span id="copy-label">Copy</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- Shoutcast Directory — always visible; status dot tracks the live listing -->
+  <div class="stream-link-card shoutcast-card" id="shoutcast-card">
+    <div class="shoutcast-head">
+      <img class="shoutcast-icon" src="/static/shoutcast-icon.gif" alt="SHOUTcast" height="24">
+      <span class="link-label">Shoutcast Directory</span>
+      <span class="shoutcast-status" id="shoutcast-status"><span class="dot"></span><span id="shoutcast-status-text">Up</span></span>
+    </div>
+    <a class="shoutcast-link" id="shoutcast-search-link"
+       href="https://directory.shoutcast.com/Search?query=FrogRock"
+       target="_blank" rel="noopener">&#128225; View &ldquo;FrogRock&rdquo; on the Shoutcast Directory</a>
+    <div class="link-row">
+      <input type="text" class="link-input" id="shoutcast-stream-url" readonly>
+      <button class="copy-btn" id="shoutcast-copy-btn" title="Copy to clipboard">
+        <span id="shoutcast-copy-icon">&#128203;</span>
+        <span id="shoutcast-copy-label">Copy</span>
       </button>
     </div>
   </div>
@@ -989,6 +1068,66 @@ document.addEventListener('keydown', (e) => {
       break;
   }
 });
+
+// ── Shoutcast Directory card (additive; existing player code above is untouched) ──
+// The server polls the Shoutcast directory (its search + tunein endpoints) and
+// probes the registered stream URL — the directory's own reachability check —
+// and caches the verdict. This block polls /api/shoutcast on its own timer so
+// the status dot reflects whether the registered stream is live.
+let shoutcastData = null;
+
+async function fetchShoutcast() {
+  try {
+    const r = await fetch(API_BASE + '/api/shoutcast');
+    if (!r.ok) return;
+    shoutcastData = await r.json();
+  } catch (e) { /* ignore */ }
+}
+
+function updateShoutcastCard() {
+  const card = document.getElementById('shoutcast-card');
+  if (!card) return;
+  const urlEl = document.getElementById('shoutcast-stream-url');
+  if (urlEl && shoutcastData && shoutcastData.streamUrl) urlEl.value = shoutcastData.streamUrl;
+  const link = document.getElementById('shoutcast-search-link');
+  if (link && shoutcastData && shoutcastData.searchUrl) link.href = shoutcastData.searchUrl;
+  const status = document.getElementById('shoutcast-status');
+  const text = document.getElementById('shoutcast-status-text');
+  if (status && text) {
+    const up = !!(shoutcastData && shoutcastData.up);
+    status.classList.toggle('down', !up);
+    text.textContent = up ? 'Up' : 'Down';
+  }
+}
+
+async function refreshShoutcast() {
+  await fetchShoutcast();
+  updateShoutcastCard();
+}
+
+refreshShoutcast();
+setInterval(refreshShoutcast, REFRESH_INTERVAL);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) refreshShoutcast();
+});
+
+// Copy button for the Shoutcast stream URL
+const shoutcastCopyBtn = document.getElementById('shoutcast-copy-btn');
+if (shoutcastCopyBtn) {
+  shoutcastCopyBtn.addEventListener('click', () => {
+    const urlEl = document.getElementById('shoutcast-stream-url');
+    navigator.clipboard.writeText(urlEl.value).then(() => {
+      const label = document.getElementById('shoutcast-copy-label');
+      label.textContent = 'Copied!';
+      shoutcastCopyBtn.classList.add('copied');
+      setTimeout(() => {
+        label.textContent = 'Copy';
+        shoutcastCopyBtn.classList.remove('copied');
+      }, 2000);
+    });
+  });
+}
+
 </script>
 </body>
 </html>

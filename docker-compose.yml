@@ -12,6 +12,9 @@ services:
       - NET_ADMIN
     sysctls:
       - net.ipv4.conf.all.src_valid_mark=1
+    networks:
+      frogrock_net:
+        ipv4_address: 172.35.0.10
 
   shoutcast-dnas:
     build:
