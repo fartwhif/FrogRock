@@ -175,7 +175,7 @@ const BURST_DURATION_SEC = parseInt(process.env.BURST_DURATION_SEC || '8', 10);
 // is UP. The web UI card is shown only while that is true.
 const SHOUTCAST_QUERY = process.env.SHOUTCAST_QUERY || 'FrogRock';
 const SHOUTCAST_STATION_NAME = process.env.SHOUTCAST_STATION_NAME || 'FrogRock Radio';
-const SHOUTCAST_SEARCH_URL = `https://directory.shoutcast.com/Search?query=${encodeURIComponent(SHOUTCAST_QUERY)}`;
+const SHOUTCAST_SEARCH_URL = `http://directory.shoutcast.com/Search?query=${encodeURIComponent(SHOUTCAST_QUERY)}`;
 const SHOUTCAST_POLL_MS = parseInt(process.env.SHOUTCAST_POLL_MS || '60000', 10);
 const SHOUTCAST_HTTP_TIMEOUT_MS = 15000;
 
