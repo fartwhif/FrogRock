@@ -45,7 +45,7 @@ services:
       - UPSTREAM_HOST=frogrock
       - UPSTREAM_PORT=8090
     ports:
-      - "127.0.0.1:18301:8091"
+      - "127.0.0.1:18998:8091"
     networks:
       frogrock_net:
         ipv4_address: 172.35.0.30
