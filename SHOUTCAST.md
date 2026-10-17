@@ -219,6 +219,36 @@ bitrate shifts (64 k → 128 k / 160 k) are observed passing through with
 correct title updates on either side (verified in `played.html`, cross-checked
 against `DrivePod/cache/status.json`). Do not chase them as a fault.
 
+**15. Eaten-head fix — silence prefix on format flips (2026-10-17).** Symptom: at
+each grabby ↔ podcast transition the public stream was missing the first few
+seconds of the new track. Root cause is DNAS 2.6.1.777 relay behavior: on a
+*format-family* flip (podcast 64 kbps/24 kHz/mono, 192 B frame ↔ grabby
+160 kbps/44.1 kHz/stereo, 523 B frame) the relay **drops and reconnects**
+(~5–6 s, `relayreconnecttime=5`), losing the new track's head; same-family
+flips pass through clean (the `Frame settings changed` WARNs in point 14 are
+the fingerprint of these drops in `sc_serv.log`).
+Fix (byte-passthrough, **no re-encode**, DNAS untouched): prepend a fixed
+number of seconds of matching-format silence to every track so a reconnecting relay
+replays silence instead of the track's real audio (content is preserved).
+  * `server.ts` — `buildSilencePrefix(templateFrame, seconds)`: clones the
+track's own real 4-byte MPEG header + an all-zero payload, `ceil` frames, so
+the codec parser (and DNAS) see valid frames that decode to exact digital
+silence. Sample-per-frame from `sampleRate > 16000 ? 1152 : 576`.
+  * `startCurrentTrack` broadcasts it instantly (in the `BurstBuffer`, not
+paced) immediately before the `probeFrames` loop, tagged with the track's
+title/author/channel.
+  * Knob: `SILENCE_PREFIX_SEC` env, **default 8**, `0` disables.
+  * Ops: `GET /api/skip?pass=<dnaspass>` marks the current non-grabby track
+completed and advances — used to force flips during verification; left in as
+a permanent ops endpoint.
+Accepted: forced a 64 k→160 k flip, captured DNAS `:8100/radio` within the
+silence window, frame-walk of the capture shows **262 leading all-zero-payload
+160 k frames before the first non-zero frame**; decoded with ffmpeg the
+0–12 s window is **max_abs sample = 0 (true silence)** and 12–16 s is
+**max_abs = 17784 (audible audio)**. So the head the relay would otherwise
+eat is now silence; the track start is intact behind it.
+
+
 **Open (needs user confirmation):** is the authhash / "FrogRock Radio" station
 the final station, or a throwaway test? If it's the final one, the listing is
 complete as-is.

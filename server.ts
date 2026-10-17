@@ -168,6 +168,11 @@ const CLIENT_LAG_MAX_MS = parseInt(process.env.CLIENT_LAG_MAX_MS || '10000', 10)
 // Burst buffer for new-client prebuffering (duration in seconds, resized per track)
 const BURST_DURATION_SEC = parseInt(process.env.BURST_DURATION_SEC || '8', 10);
 
+// Silence prefix (seconds) in the current track's own format, prepended to the head
+// of every track. Absorbs the DNAS-relay reconnect gap at a podcast vs grabby format
+// flip (5-6 s) so the new track's first seconds are not 'eaten'. Set 0 to disable.
+const SILENCE_PREFIX_SEC = Math.max(0, parseInt(process.env.SILENCE_PREFIX_SEC || '8', 10));
+
 // ====================== SHOUTCAST DIRECTORY ======================
 // The Shoutcast directory (directory.shoutcast.com) lists our station. We poll
 // the directory's own search endpoint + tunein playlist (the same endpoints the
@@ -560,6 +565,22 @@ function probeFirstFrames(filePath: string, startOffset: number): {
   return { bitrate, channels, sampleRate, frameSize, frames };
 }
 
+function buildSilencePrefix(templateFrame: CodecFrame, seconds: number): Buffer {
+  if (seconds <= 0 || !templateFrame || templateFrame.data.length < 4) return Buffer.alloc(0);
+  const h = templateFrame.header as MPEGHeader;
+  const frameSize = templateFrame.data.length;
+  // MP3: MPEG v1/v1.5 = 1152 samples/frame, v2/v2.5 = 576 samples/frame.
+  // mpegVersion is a string ('1' or '2') per codec-parser types.
+  const samplesPerFrame = h.sampleRate > 16000 ? 1152 : 576;
+  const numFrames = Math.ceil((seconds * h.sampleRate) / samplesPerFrame);
+  const out = Buffer.alloc(numFrames * frameSize);
+  const hdr = Buffer.from(templateFrame.data.buffer, templateFrame.data.byteOffset, 4);
+  for (let i = 0; i < numFrames; i++) {
+    hdr.copy(out, i * frameSize);
+  }
+  return out;
+}
+
 function computeBurstCapacity(frameSize: number, bitrate: number): number {
   const maxMetadataSize = 1 + 16 * 255;
   const contentAwareFrames = Math.ceil((METAIMNT_TARGET + maxMetadataSize) / frameSize) + 2;
@@ -670,6 +691,23 @@ async function startCurrentTrack(): Promise<void> {
     track.author,
     track.channel?.title ?? 'Unknown'
   );
+
+  // Prepend matching-format silence so the DNAS relay's 5-6 s reconnect at a format
+  // flip is absorbed by silence instead of by the track's real audio. The relay's
+  // re-attached handshake replays this buffer (not audio), so no real content is lost.
+  if (SILENCE_PREFIX_SEC > 0) {
+    const silence = buildSilencePrefix(probeFrames[0], SILENCE_PREFIX_SEC);
+    if (silence.length > 0) {
+      manifold.broadcastAudio(
+        silence,
+        track.title || path.basename(filePath),
+        track.author,
+        track.channel?.title ?? 'Unknown',
+        trackStartTime
+      );
+      manifold.prune();
+    }
+  }
 
   for (const frame of probeFrames) {
     manifold.broadcastAudio(
@@ -1084,6 +1122,25 @@ const server = http.createServer((req: http.IncomingMessage, res: http.ServerRes
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end('{"status":"idle","currentTrack":null}');
     }
+    return;
+  }
+
+  // Ops: skip to the next track (advances to the next playlist entry immediately).
+  if (pathPart === '/api/skip' && params.get('pass') === '7dco2P1WQShV5lbqMuxu') {
+    if (isPlaying) {
+      // Force the current track to be marked complete (if it's a podcast) so
+      // advanceToNextTrack() does not loop through it.
+      const curId = currentTrackData?.id;
+      if (curId && currentTrackData?.isGrabby !== true) {
+        const newCompleted = new Set(state.completedTracks);
+        newCompleted.add(curId);
+        updateState({ completedTracks: newCompleted });
+        saveCompletedTracks();
+      }
+    }
+    advanceToNextTrack();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
     return;
   }
 
