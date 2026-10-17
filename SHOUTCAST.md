@@ -182,6 +182,43 @@ headers; `https://frogrock.esfbc.com:8000/radio` → 200, cert validates
 against system CAs; user-confirmed the directory web player plays
 (2026-09-08).
 
+**13. GrabbyTube starvation fix (2026-10-17).** Symptom: for days the
+broadcast played *only* podcasts; none of the 720 GrabbyTube tracks
+(`isGrabby: true` in DrivePod's `index.json`) aired on the public stream.
+Relay side was exonerated first: DNAS logs show 80+ successful grabby
+`Title update` + YP pushes (Sep 30 – Oct 5), `played.html` tracks FrogRock's
+transitions, `stream-fix` shows no errors, DNAS relay is connected/healthy.
+Real cause is in FrogRock `server.ts`: the station keeps a sticky
+`completedTracks: Set<string>` (shared `completed.json`) and
+`advanceToNextTrack` skips every track in it, resetting only when *all*
+playlist entries are completed. DrivePod's 5-min harvest keeps adding fresh
+podcasts, so "all completed" never fires; meanwhile `completed.json`
+accumulated **712/720 = 99%** of the grabby IDs against only 682/889 of the
+podcasts, so the walker skipped the entire grabby cluster forever.
+Fix (no re-encode, DNAS stack untouched):
+  * `Track` interface gained `isGrabby?: boolean`.
+  * `refreshPlaylist` now excludes grabby IDs from the persisted completed set
+(drops any already-persisted ones; log line now reads
+`Playlist refreshed — 1609 tracks (720 grabby; 1881 completed)`), and
+  * `startCurrentTrack` no longer adds a finished grabby track to
+`completedTracks` (grabby is music content meant for indefinite rotation —
+DrivePod's `distributeGrabbyItems` reconditions it "reused indefinitely").
+Podcast dedup is unchanged. Purge applied to the live `completed.json`
+(2658 → 1881 IDs). After the 33-min podcast currently mid-play finishes, the
+next 4 tracks in the rotation queue are grabby (ZZ Top, Michael McDonald, U2,
+John Parr …) and all are uncompleted — grabby re-enters within that one track
+and keeps rotating thereafter.
+
+**14. DNAS `Frame settings changed, could cause playback problems` is benign.**
+~300 of these WARNs appear in `sc_serv.log` throughout station history —
+exactly at each grabby ↔ podcast transition, where the source MP3 properties
+change (podcast 64 kbps/24 kHz/mono → grabby 160 kbps/44.1 kHz/stereo or
+64 kbps v2). They are informational: DNAS is a byte-passing relay (no
+transcode), ICY metaint frames carry per-track `StreamTitle`, and both
+bitrate shifts (64 k → 128 k / 160 k) are observed passing through with
+correct title updates on either side (verified in `played.html`, cross-checked
+against `DrivePod/cache/status.json`). Do not chase them as a fault.
+
 **Open (needs user confirmation):** is the authhash / "FrogRock Radio" station
 the final station, or a throwaway test? If it's the final one, the listing is
 complete as-is.

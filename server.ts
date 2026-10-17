@@ -135,6 +135,7 @@ interface Track {
   channel: Channel;
   author: string;
   source?: 'main';
+  isGrabby?: boolean;
 }
 
 interface AppState {
@@ -452,27 +453,17 @@ function refreshPlaylist(): void {
     return;
   }
 
-  let newCompleted = new Set(state.completedTracks);
-
-  try {
-    if (fs.existsSync(COMPLETED_TRACKS_PATH)) {
-      const completedData = fs.readFileSync(COMPLETED_TRACKS_PATH, 'utf8');
-      const parsed = JSON.parse(completedData);
-      if (Array.isArray(parsed)) {
-        newCompleted = new Set(parsed as string[]);
-      }
-    }
-  } catch (e) {
-    console.error('Error loading completed tracks:', e);
-  }
-
+  // Load the index once; we need it both to build the playlist and to know
+  // which IDs are grabby. Grabby tracks are music content (intended for
+  // indefinite rotation — see DrivePod's distributeGrabbyItems), so they
+  // are EXCLUDED from the completed set: adding them would cause
+  // advanceToNextTrack to permanently skip them until the full reset.
+  let index: Track[] = [];
   try {
     const indexData = fs.readFileSync(INDEX_JSON_PATH, 'utf8');
-    const index = JSON.parse(indexData);
-
-    let newPlaylist: Track[] = [];
-    if (Array.isArray(index)) {
-      newPlaylist = index
+    const parsed = JSON.parse(indexData);
+    if (Array.isArray(parsed)) {
+      index = parsed
         .filter((item): item is Track => Boolean(item && item.audioPath))
         .map((t: Track) => ({
           ...t,
@@ -481,27 +472,51 @@ function refreshPlaylist(): void {
           thumbnailPath: normalizePath(t.thumbnailPath),
         }));
     }
-
-    // Preserve current track index — find current track by ID in new playlist
-    let newIndex = state.currentTrackIndex;
-    const playingId = currentTrackData?.id;
-    if (playingId) {
-      const found = newPlaylist.findIndex(t => t.id === playingId);
-      if (found !== -1) {
-        newIndex = found;
-      }
-    }
-
-    updateState({
-      playlist: newPlaylist,
-      currentTrackIndex: newIndex,
-      completedTracks: newCompleted,
-    });
-
-    console.log(`Playlist refreshed — ${newPlaylist.length} tracks`);
   } catch (error) {
     console.error('Error reading index file:', error);
+    return;
   }
+
+  const grabbyIds = new Set(index.filter(t => t.isGrabby === true).map(t => t.id));
+
+  // Rebuild the completed set from disk, dropping any grabby ids that may
+  // have been persisted by the old code (they must stay playable).
+  const newCompleted = new Set<string>();
+  if (fs.existsSync(COMPLETED_TRACKS_PATH)) {
+    try {
+      const completedData = fs.readFileSync(COMPLETED_TRACKS_PATH, 'utf8');
+      const parsed = JSON.parse(completedData);
+      if (Array.isArray(parsed)) {
+        for (const id of parsed as string[]) {
+          if (!grabbyIds.has(id)) newCompleted.add(id);
+        }
+      }
+    } catch (e) {
+      console.error('Error loading completed tracks:', e);
+    }
+  }
+  for (const id of state.completedTracks) {
+    if (!grabbyIds.has(id)) newCompleted.add(id);
+  }
+
+  // Preserve current track index — find current track by ID in new playlist
+  let newIndex = state.currentTrackIndex;
+  const playingId = currentTrackData?.id;
+  if (playingId) {
+    const found = index.findIndex(t => t.id === playingId);
+    if (found !== -1) {
+      newIndex = found;
+    }
+  }
+
+  updateState({
+    playlist: index,
+    currentTrackIndex: newIndex,
+    completedTracks: newCompleted,
+  });
+
+  const grabbyCount = grabbyIds.size;
+  console.log(`Playlist refreshed — ${index.length} tracks (${grabbyCount} grabby; ${newCompleted.size} completed)`);
 }
 
 function saveCompletedTracks(): void {
@@ -718,10 +733,12 @@ async function startCurrentTrack(): Promise<void> {
     fs.closeSync(fd);
     console.log(`✓ Finished: ${track.title || path.basename(filePath)}`);
 
-    const newCompleted = new Set(state.completedTracks);
-    newCompleted.add(track.id);
-    updateState({ completedTracks: newCompleted });
-    saveCompletedTracks();
+    if (track.isGrabby !== true) {
+      const newCompleted = new Set(state.completedTracks);
+      newCompleted.add(track.id);
+      updateState({ completedTracks: newCompleted });
+      saveCompletedTracks();
+    }
 
     advanceToNextTrack();
   };
