@@ -11,7 +11,7 @@ import 'dotenv/config';
 import http from 'http';
 import fs from 'fs';
 import path from 'path';
-import { execFile } from 'child_process';
+import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import CodecParser, { CodecFrame, MPEGHeader } from 'codec-parser';
 import { Writer } from './src/icy-writer';
@@ -142,6 +142,7 @@ interface AppState {
   playlist: readonly Track[];
   currentTrackIndex: number;
   completedTracks: ReadonlySet<string>;
+  grabbyPlayed: ReadonlyMap<string, string>;
   currentTrackStartTime: number;
 }
 
@@ -149,6 +150,7 @@ type StatePartial = Partial<{
   playlist: Track[];
   currentTrackIndex: number;
   completedTracks: Set<string>;
+  grabbyPlayed: Map<string, string>;
   currentTrackStartTime: number;
 }>;
 
@@ -157,6 +159,7 @@ const PORT = parseInt(process.env.PORT || '8090', 10);
 const CACHE_DIR = process.env.CACHE_DIR || 'UNCONFIGURED';
 const INDEX_JSON_PATH = path.join(CACHE_DIR, 'index.json');
 const COMPLETED_TRACKS_PATH = path.join(CACHE_DIR, 'completed.json');
+const GRABBY_PLAYED_PATH = path.join(CACHE_DIR, 'grabby-played.json');
 const STATUS_PATH = path.join(CACHE_DIR, 'status.json');
 const METAIMNT_TARGET = 16000;
 const MAX_METADATA_LEN = 255;
@@ -196,6 +199,7 @@ let state: AppState = Object.freeze({
   playlist: Object.freeze([] as Track[]),
   currentTrackIndex: 0,
   completedTracks: Object.freeze(new Set<string>()),
+  grabbyPlayed: Object.freeze(new Map<string, string>()),
   currentTrackStartTime: Date.now(),
 });
 
@@ -208,11 +212,16 @@ function updateState(partial: StatePartial): void {
     ? Object.freeze(new Set(partial.completedTracks))
     : state.completedTracks;
 
+  const newGrabbyPlayed = partial.grabbyPlayed
+    ? Object.freeze(new Map(partial.grabbyPlayed))
+    : state.grabbyPlayed;
+
   const newState: AppState = {
     ...state,
     ...partial,
     playlist: newPlaylist,
     completedTracks: newCompleted,
+    grabbyPlayed: newGrabbyPlayed,
   };
 
   state = Object.freeze(newState);
@@ -428,6 +437,175 @@ class ClientManifold {
 
 const manifold = new ClientManifold();
 let audioBuffer = new BurstBuffer(0);
+// ====================== TARGET-FORMAT TRANSCODE CACHE ======================
+// Keep the public audio format stable across all tracks (podcast audio is
+// natively 64 kbps / mono / 24 kHz; grabby tracks arrive in arbitrary
+// formats, e.g. 160 k/44.1 k/stereo). Non-conforming tracks are transcoded
+// on demand to the target spec via ffmpeg (libmp3lame) and cached as a
+// sidecar file next to the original (`.tr64k.mp3`), then retrieved from
+// cache on later plays. The original file is never modified.
+const TRANSCODE_BITRATE = 64000;    // bps
+const TRANSCODE_CHANNELS = 1;      // mono
+const TRANSCODE_SAMPLE_RATE = 24000;
+
+/**
+ * One target-format silence frame. 24 kHz is an MPEG2-only rate → 576
+ * samples/frame → 72·64000/24000 = 192 bytes/frame (identical to the native
+ * podcast frame). Header bytes ff f3 84 c4 verified against a real
+ * 64 k/24 k/mono LAME encode and against live podcast files (frameSize 192).
+ * Payload is all zeros → decodes to exact digital silence.
+ */
+const TARGET_FRAME: Buffer = (() => {
+  const f = Buffer.alloc(192);
+  f[0] = 0xff; f[1] = 0xf3; f[2] = 0x84; f[3] = 0xc4;
+  return f;
+})();
+const TARGET_METAINT = Math.max(1, Math.round(METAIMNT_TARGET / TARGET_FRAME.length)) * TARGET_FRAME.length;
+
+/** ffprobe-based check that a file already streams as the target format. */
+async function isTargetFormat(filePath: string): Promise<boolean> {
+  try {
+    const { bitrate, channels, sampleRate } = await probeAudioProps(filePath);
+    return bitrate === TRANSCODE_BITRATE &&
+      channels === TRANSCODE_CHANNELS &&
+      sampleRate === TRANSCODE_SAMPLE_RATE;
+  } catch {
+    return false;
+  }
+}
+
+class TranscodeSuperseded extends Error {
+  constructor() { super('transcode superseded mid-run'); this.name = 'TranscodeSuperseded'; }
+}
+
+/**
+ * Encode input → outputPath at the target spec (libmp3lame, no Xing/ID3 so
+ * the frame parser reads from offset 0). While ffmpeg runs, target-format
+ * silence is pumped to the manifold every 200 ms so the public stream holds
+ * at a constant 64 kbps / 24 kHz / mono and never presents another codec
+ * format mid-transition. If the track is superseded mid-run (live skip or a
+ * newer track starting), the ffmpeg child is killed and the pump stopped;
+ * the partial sidecar is left for the next start to revalidate (the original
+ * is never touched either way).
+ */
+async function transcodeToTarget(
+  inputPath: string,
+  outputPath: string,
+  metaTitle: string,
+  author: string,
+  channel: string,
+  trackStart: number,
+  isCurrent: () => boolean,
+): Promise<void> {
+  const ffmpeg = spawn('ffmpeg', [
+    '-nostdin', '-loglevel', 'error', '-y',
+    '-i', inputPath,
+    '-vn',
+    '-ac', String(TRANSCODE_CHANNELS),
+    '-ar', String(TRANSCODE_SAMPLE_RATE),
+    '-b:a', '64k',
+    // No Xing/Info/ID3 headers: codec-parser must parse frames from offset 0.
+    '-write_xing', '0', '-id3v2_version', '0',
+    outputPath,
+  ], { stdio: ['ignore', 'ignore', 'pipe'] });
+
+  const pumpSilence = (ms: number): void => {
+    if (!isCurrent()) return;
+    const frames = Math.max(1, Math.ceil((ms / 1000) * (TRANSCODE_SAMPLE_RATE / 576)));
+    const buf = Buffer.alloc(frames * TARGET_FRAME.length);
+    for (let i = 0; i < frames; i++) TARGET_FRAME.copy(buf, i * TARGET_FRAME.length);
+    manifold.broadcastAudio(buf, metaTitle, author, channel, trackStart);
+    manifold.prune();
+  };
+  const pumpTimer = setInterval(() => pumpSilence(200), 200);
+
+  // On the first tick after the track is superseded (live skip / new start),
+  // kill the transcode child immediately rather than letting it run to
+  // completion — the station no longer needs this file.
+  const supersedeWatch = setInterval(() => {
+    if (isCurrent()) return;
+    try { ffmpeg.kill('SIGKILL'); } catch { /* already gone */ }
+  }, 100);
+
+  let stderrBuf = '';
+  ffmpeg.stderr!.on('data', (d: Buffer) => { stderrBuf += d.toString(); });
+  const { code } = await new Promise<{ code: number | null }>((resolve) => {
+    ffmpeg.on('error', (err: Error) => {
+      console.warn('ffmpeg spawn error:', err.message);
+      resolve({ code: null });
+    });
+    ffmpeg.on('close', (c: number | null) => resolve({ code: c }));
+  });
+  clearInterval(pumpTimer);
+  clearInterval(supersedeWatch);
+  clearInterval(pumpTimer);
+
+  // Superseded mid-run: kill the child (if still alive) and stop here. The
+  // pump is already silenced (isCurrent() false); we abandon this transcode.
+  if (!isCurrent()) {
+    if (ffmpeg.exitCode === null && ffmpeg.signalCode === null) {
+      try { ffmpeg.kill('SIGKILL'); } catch { /* already gone */ }
+    }
+    throw new TranscodeSuperseded();
+  }
+
+  pumpSilence(200);
+  if (code !== 0) {
+    throw new Error(`ffmpeg exited ${code}: ${stderrBuf.slice(-400)}`);
+  }
+}
+
+/**
+ * Resolve a streamable path for the track. If the original already streams
+ * at the target format, return it directly (fast path). Otherwise return the
+ * sidecar cache if fresh and valid. Otherwise signal that a transcode must
+ * run — the caller owns the ordering of metaint push + silence stream, then
+ * invokes the returned `run()` and revalidates the result.
+ */
+async function resolveOrTranscodeSpec(
+  originalPath: string,
+): Promise<
+  | { kind: 'direct'; path: string }
+  | { kind: 'cached'; path: string }
+  | { kind: 'transcode'; run: (metaTitle: string, author: string, channel: string,
+      trackStart: number, isCurrent: () => boolean) => Promise<string> }
+> {
+  if (await isTargetFormat(originalPath)) return { kind: 'direct', path: originalPath };
+
+  const sidecarPath = `${originalPath}.tr64k.mp3`;
+  try {
+    const [orig, side] = await Promise.all([
+      fs.promises.stat(originalPath),
+      fs.promises.stat(sidecarPath),
+    ]);
+    if (side.mtimeMs >= orig.mtimeMs && (await isTargetFormat(sidecarPath))) {
+      return { kind: 'cached', path: sidecarPath };
+    }
+  } catch {
+    // no cache yet
+  }
+
+  // Transcode directly into a real .mp3-named sidecar (ffmpeg infers the
+  // encoder from the extension). On any failure — real ffmpeg error or a
+  // supersede mid-run — remove the partial file so it can never be mistaken
+  // for a valid cache hit; the original is never touched either way.
+  const run = async (
+    metaTitle: string,
+    author: string,
+    channel: string,
+    trackStart: number,
+    isCurrent: () => boolean,
+  ): Promise<string> => {
+    try {
+      await transcodeToTarget(originalPath, sidecarPath, metaTitle, author, channel, trackStart, isCurrent);
+    } catch (err) {
+      try { fs.unlinkSync(sidecarPath); } catch { /* not present */ }
+      throw err;
+    }
+    return sidecarPath;
+  };
+  return { kind: 'transcode', run };
+}
 
 // ====================== ACTIVE STREAM STATE ======================
 let isPlaying = false;
@@ -452,6 +630,12 @@ function normalizePath(p: string): string {
 }
 
 // ====================== PLAYLIST MANAGEMENT ======================
+/** publishedAt as epoch ms; malformed/missing values sort to the bottom. */
+function publishedTime(t: Track): number {
+  const ms = new Date(t.publishedAt).getTime();
+  return Number.isFinite(ms) ? ms : 0;
+}
+
 function refreshPlaylist(): void {
   if (!fs.existsSync(INDEX_JSON_PATH)) {
     console.error(`index file not found: ${INDEX_JSON_PATH}`);
@@ -477,6 +661,14 @@ function refreshPlaylist(): void {
           thumbnailPath: normalizePath(t.thumbnailPath),
         }));
     }
+    // Re-sort newest-first on every refresh (DrivePod "newest" strategy).
+    // publishedAt desc, videoId asc tiebreak — the same deterministic
+    // ordering DrivePod uses to generate index.json, so batched imports and
+    // grabby cluster bands (shared timestamps) stay stable across refreshes.
+    index.sort((a, b) => {
+      const d = publishedTime(b) - publishedTime(a);
+      return d !== 0 ? d : a.videoId < b.videoId ? -1 : a.videoId > b.videoId ? 1 : 0;
+    });
   } catch (error) {
     console.error('Error reading index file:', error);
     return;
@@ -504,6 +696,31 @@ function refreshPlaylist(): void {
     if (!grabbyIds.has(id)) newCompleted.add(id);
   }
 
+  // Rebuild the recently-played grabby set from disk + memory. An entry
+  // survives only while the index still carries that item with the same
+  // publishedAt: DrivePod's distributeGrabbyItems reconditions a grabby
+  // item with a fresh clustered timestamp, which is the re-entrance signal
+  // (its equivalent of the watched-flag reset) — items that vanished from
+  // the index are dropped.
+  const pubById = new Map<string, string>();
+  for (const t of index) pubById.set(t.id, t.publishedAt);
+  const newGrabbyPlayed = new Map<string, string>();
+  if (fs.existsSync(GRABBY_PLAYED_PATH)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(GRABBY_PLAYED_PATH, 'utf8'));
+      if (parsed && typeof parsed === 'object') {
+        for (const [id, playedAt] of Object.entries(parsed as Record<string, string>)) {
+          if (typeof playedAt === 'string' && pubById.get(id) === playedAt) newGrabbyPlayed.set(id, playedAt);
+        }
+      }
+    } catch (e) {
+      console.error('Error loading grabby-played tracks:', e);
+    }
+  }
+  for (const [id, playedAt] of state.grabbyPlayed) {
+    if (pubById.get(id) === playedAt) newGrabbyPlayed.set(id, playedAt);
+  }
+
   // Preserve current track index — find current track by ID in new playlist
   let newIndex = state.currentTrackIndex;
   const playingId = currentTrackData?.id;
@@ -518,10 +735,11 @@ function refreshPlaylist(): void {
     playlist: index,
     currentTrackIndex: newIndex,
     completedTracks: newCompleted,
+    grabbyPlayed: newGrabbyPlayed,
   });
 
   const grabbyCount = grabbyIds.size;
-  console.log(`Playlist refreshed — ${index.length} tracks (${grabbyCount} grabby; ${newCompleted.size} completed)`);
+  console.log(`Playlist refreshed — ${index.length} tracks (${grabbyCount} grabby; ${newCompleted.size} completed; ${newGrabbyPlayed.size} grabby recently played)`);
 }
 
 function saveCompletedTracks(): void {
@@ -532,6 +750,34 @@ function saveCompletedTracks(): void {
     );
   } catch (error) {
     console.error('Error saving completed tracks:', error);
+  }
+}
+
+function saveGrabbyPlayed(): void {
+  try {
+    const tmpPath = GRABBY_PLAYED_PATH + '.tmp';
+    fs.writeFileSync(tmpPath, JSON.stringify(Object.fromEntries(state.grabbyPlayed), null, 2));
+    fs.renameSync(tmpPath, GRABBY_PLAYED_PATH);
+  } catch (error) {
+    console.error('Error saving grabby-played tracks:', error);
+  }
+}
+
+/** Record that a finished track has aired: podcasts join the persisted
+ *  completed set; grabby items join the recently-played set — they stay
+ *  replayable (DrivePod reconditions them for indefinite rotation) but must
+ *  not be re-picked immediately by the newest-first selection. */
+function markTrackPlayed(track: Track): void {
+  if (track.isGrabby !== true) {
+    const newCompleted = new Set(state.completedTracks);
+    newCompleted.add(track.id);
+    updateState({ completedTracks: newCompleted });
+    saveCompletedTracks();
+  } else {
+    const newPlayed = new Map(state.grabbyPlayed);
+    newPlayed.set(track.id, track.publishedAt);
+    updateState({ grabbyPlayed: newPlayed });
+    saveGrabbyPlayed();
   }
 }
 
@@ -597,6 +843,7 @@ function writeStatus(): void {
     currentTrack: currentTrackData,
     currentTrackIndex: state.currentTrackIndex,
     completedTracks: Array.from(state.completedTracks),
+    grabbyPlayed: Object.fromEntries(state.grabbyPlayed),
     bitrate: currentTrackBitrate,
     channels: currentTrackChannels,
     sampleRate: currentTrackSampleRate,
@@ -639,9 +886,65 @@ async function startCurrentTrack(): Promise<void> {
     return;
   }
 
+  // Claim this track first: any in-flight start/transcode/loop for another
+  // track sees currentTrackData change and abandons its output (live skip).
+  currentTrackData = track;
+
+  // Decide what goes on the wire: the original (already target format), a
+  // cached sidecar, or a transcode that runs now. The transcode path holds
+  // the wire with target-format silence so the public stream never flips
+  // into another codec format mid-transition.
+  const spec = await resolveOrTranscodeSpec(filePath);
+  if (currentTrackData?.id !== track.id) {
+    console.log(`  ~ superseded during prep for ${track.title || path.basename(filePath)}`);
+    return;
+  }
+
+  let streamPath: string;
+  if (spec.kind === 'transcode') {
+    const channel = track.channel?.title ?? 'Unknown';
+    const title = track.title || path.basename(filePath);
+    const isCurrent = (): boolean => currentTrackData?.id === track.id;
+
+    // Set the target metaint on every client writer BEFORE any audio (the
+    // silence pump) reaches the wire, then stream silence while transcode.
+    currentMetaint = TARGET_METAINT;
+    for (const client of manifold.clients) {
+      if (client.writer) client.writer.metaint = TARGET_METAINT;
+    }
+    manifold.broadcastMetadata(title, track.author, channel);
+
+    let sidecarPath: string | undefined;
+    try {
+      sidecarPath = await spec.run(title, track.author, channel, trackStartTime, isCurrent);
+    } catch (err) {
+      if (!isCurrent()) return;
+      console.warn(`⚠ transcode failed — falling back to original: ${(err as Error).message}`);
+    }
+    if (!isCurrent()) return;
+
+    if (sidecarPath !== undefined && (await isTargetFormat(sidecarPath))) {
+      streamPath = sidecarPath;
+    } else {
+      streamPath = filePath;
+      if (sidecarPath !== undefined) console.warn(`  ~ sidecar invalid, streaming original`);
+    }
+  } else {
+    streamPath = spec.path;
+  }
+
+  await streamResolvedTrack(streamPath, filePath, track);
+}
+
+/**
+ * Stream an already-resolved audio file in real time: probe, metaint, burst
+ * buffer, silence prefix, first frames, and the pacing loop with
+ * superseded-detection so a live skip abandons the stale stream promptly.
+ */
+async function streamResolvedTrack(streamPath: string, originalPath: string, track: Track): Promise<void> {
   let startOffset = 0;
   try {
-    const fd = fs.openSync(filePath, 'r');
+    const fd = fs.openSync(streamPath, 'r');
     const header = Buffer.alloc(10);
     fs.readSync(fd, header, 0, 10, 0);
     fs.closeSync(fd);
@@ -653,57 +956,65 @@ async function startCurrentTrack(): Promise<void> {
     startOffset = 0;
   }
 
-  currentTrackData = track;
+  const trackStart = Date.now();
+  trackStartTime = trackStart;
   currentByteOffset = 0;
-  trackStartTime = Date.now();
-  currentTrackFileSize = fs.statSync(filePath).size;
+  const trackFileSize = fs.statSync(streamPath).size;
+  currentTrackFileSize = trackFileSize;
 
   // Ground truth for UI display (bitrate, channels, sampleRate)
-  const { bitrate, channels, sampleRate } = await probeAudioProps(filePath);
+  const { bitrate, channels, sampleRate } = await probeAudioProps(streamPath);
   currentTrackBitrate = bitrate;
   currentTrackChannels = channels;
   currentTrackSampleRate = sampleRate;
 
   // codec-parser only for frameSize (internal stream pacing)
-  const { frameSize, frames: probeFrames } = probeFirstFrames(filePath, startOffset);
+  const { frameSize, frames: probeFrames } = probeFirstFrames(streamPath, startOffset);
   currentFrameSize = frameSize;
 
   // Calculate metaint as a multiple of frame size to avoid splitting MP3 frames
   const framesPerMeta = Math.round(METAIMNT_TARGET / frameSize);
-  currentMetaint = framesPerMeta * frameSize;
+  const trackMetaint = framesPerMeta * frameSize;
+  currentMetaint = trackMetaint;
+
+  if (currentTrackData?.id !== track.id) {
+    console.log(`  ~ superseded before stream start for ${track.title || path.basename(streamPath)}`);
+    return;
+  }
 
   // Push new metaint to existing ICY writers so metadata stays frame-aligned
   for (const client of manifold.clients) {
     if (client.writer) {
-      client.writer.metaint = currentMetaint;
+      client.writer.metaint = trackMetaint;
     }
   }
 
-  const burstCapacityFrames = computeBurstCapacity(currentFrameSize, currentTrackBitrate);
+  const burstCapacityFrames = computeBurstCapacity(frameSize, bitrate);
   audioBuffer = new BurstBuffer(burstCapacityFrames);
 
-  const displayTitle = track.title || path.basename(filePath);
+  const metaTitle = track.title || path.basename(streamPath);
   const channelInfo = track.channel?.title ? ` [${track.channel.title}]` : '';
-  console.log(`▶️  Broadcasting: ${displayTitle}${channelInfo} (startOffset: ${startOffset}, bitrate: ${currentTrackBitrate / 1000}kbps, frameSize: ${currentFrameSize}, metaint: ${currentMetaint} (${framesPerMeta} frames), burst: ${burstCapacityFrames} frames)`);
+  const sourceNote = streamPath === originalPath ? '' : ' (target-format transcode)';
+  console.log(`▶️  Broadcasting: ${metaTitle}${channelInfo}${sourceNote} (startOffset: ${startOffset}, bitrate: ${bitrate / 1000}kbps, frameSize: ${frameSize}, metaint: ${trackMetaint} (${framesPerMeta} frames), burst: ${burstCapacityFrames} frames)`);
 
   manifold.broadcastMetadata(
-    track.title || path.basename(filePath),
+    metaTitle,
     track.author,
     track.channel?.title ?? 'Unknown'
   );
 
-  // Prepend matching-format silence so the DNAS relay's 5-6 s reconnect at a format
-  // flip is absorbed by silence instead of by the track's real audio. The relay's
-  // re-attached handshake replays this buffer (not audio), so no real content is lost.
+  // Silence prefix in the track's own (now uniformly target) format: holds
+  // the wire during the DNAS relay's 5–6 s reconnect window at a track flip
+  // so the re-attached handshake replays silence, never the track's head.
   if (SILENCE_PREFIX_SEC > 0) {
     const silence = buildSilencePrefix(probeFrames[0], SILENCE_PREFIX_SEC);
     if (silence.length > 0) {
       manifold.broadcastAudio(
         silence,
-        track.title || path.basename(filePath),
+        metaTitle,
         track.author,
         track.channel?.title ?? 'Unknown',
-        trackStartTime
+        trackStart
       );
       manifold.prune();
     }
@@ -712,113 +1023,117 @@ async function startCurrentTrack(): Promise<void> {
   for (const frame of probeFrames) {
     manifold.broadcastAudio(
       Buffer.from(frame.data),
-      track.title || path.basename(filePath),
+      metaTitle,
       track.author,
       track.channel?.title ?? 'Unknown',
-      trackStartTime
+      trackStart
     );
   }
 
   isPlaying = true;
-  const probeBytesConsumed = probeFrames.reduce((sum, f) => sum + f.data.length, 0);
-  const fd = fs.openSync(filePath, 'r');
-  const audioBytes = currentTrackFileSize - startOffset;
-  const contentLengthSec = audioBytes / (currentTrackBitrate / 8);
+  const t = Date.now();
+  let sent = startOffset + probeFrames.reduce((sum, f) => sum + f.data.length, 0);
+  const fd = fs.openSync(streamPath, 'r');
+  const audioBytes = trackFileSize - startOffset;
+  const contentLengthSec = audioBytes / (bitrate / 8);
   const parser = new CodecParser('audio/mpeg', { enableFrameCRC32: false });
-  const streamLoop = async () => {
-    const t = Date.now();
-    let sent = startOffset + probeBytesConsumed;
 
-    while (sent < currentTrackFileSize) {
-      const g = (Date.now() - t) / 1000;
-      const shouldHaveSent = (g / contentLengthSec) * audioBytes + startOffset;
-      const behind = shouldHaveSent - sent;
-
-      if (behind > 0) {
-        const readSize = Math.min(Math.ceil(behind), 8192, currentTrackFileSize - sent);
-        const buf = Buffer.alloc(readSize);
-        const bytesRead = fs.readSync(fd, buf, 0, readSize, sent);
-
-        if (bytesRead > 0) {
-          sent += bytesRead;
-          currentByteOffset = sent;
-          const frames = [...parser.parseChunk(buf.slice(0, bytesRead)) as unknown as Generator<CodecFrame>];
-          for (const frame of frames) {
-            manifold.broadcastAudio(
-              Buffer.from(frame.data),
-              track.title || path.basename(filePath),
-              track.author,
-              track.channel?.title ?? 'Unknown',
-              trackStartTime
-            );
-          }
-          manifold.prune();
-        }
-      }
-      await new Promise(r => setTimeout(r, 100));
-    }
-
-    for (const frame of parser.flush() as unknown as Generator<CodecFrame>) {
+  const pump = (maxBytes: number, flush: boolean): void => {
+    const readSize = Math.min(Math.ceil(maxBytes), trackFileSize - sent);
+    const buf = Buffer.alloc(readSize);
+    const bytesRead = fs.readSync(fd, buf, 0, readSize, sent);
+    if (bytesRead <= 0) return;
+    sent += bytesRead;
+    currentByteOffset = sent;
+    const frames = [...parser.parseChunk(buf.slice(0, bytesRead)) as unknown as Generator<CodecFrame>];
+    for (const frame of frames) {
       manifold.broadcastAudio(
         Buffer.from(frame.data),
-        track.title || path.basename(filePath),
+        metaTitle,
         track.author,
         track.channel?.title ?? 'Unknown',
-        trackStartTime
+        trackStart
       );
     }
-    manifold.prune();
-    fs.closeSync(fd);
-    console.log(`✓ Finished: ${track.title || path.basename(filePath)}`);
-
-    if (track.isGrabby !== true) {
-      const newCompleted = new Set(state.completedTracks);
-      newCompleted.add(track.id);
-      updateState({ completedTracks: newCompleted });
-      saveCompletedTracks();
+    if (flush) {
+      for (const frame of parser.flush() as unknown as Generator<CodecFrame>) {
+        manifold.broadcastAudio(
+          Buffer.from(frame.data),
+          metaTitle,
+          track.author,
+          track.channel?.title ?? 'Unknown',
+          trackStart
+        );
+      }
     }
-
-    advanceToNextTrack();
+    manifold.prune();
   };
 
-  streamLoop().catch((err: Error) => {
-    try { fs.closeSync(fd); } catch {}
-    console.error('Stream error:', err.message);
-    advanceToNextTrack();
-  });
+  const closeFd = (): void => {
+    try { fs.closeSync(fd); } catch { /* already closed */ }
+  };
+
+  const streamLoop = async () => {
+    try {
+      while (sent < trackFileSize && currentTrackData?.id === track.id) {
+        const g = (Date.now() - t) / 1000;
+        const shouldHaveSent = (g / contentLengthSec) * audioBytes + startOffset;
+        const behind = shouldHaveSent - sent;
+        if (behind > 0) {
+          pump(Math.min(Math.ceil(behind), 8192), false);
+        }
+        await new Promise(r => setTimeout(r, 100));
+      }
+      if (currentTrackData?.id !== track.id) {
+        // Superseded mid-play (live skip / new start): the newer track owns
+        // the stream now — do not flush/advance from this stale loop.
+        closeFd();
+        return;
+      }
+      pump(8192, true);
+      closeFd();
+      console.log(`✓ Finished: ${track.title || path.basename(streamPath)}`);
+
+      markTrackPlayed(track);
+
+      advanceToNextTrack();
+    } catch (err) {
+      closeFd();
+      console.error('Stream error:', (err as Error).message);
+      if (currentTrackData?.id === track.id) {
+        advanceToNextTrack();
+      }
+    }
+  };
+
+  streamLoop();
 }
 
 function advanceToNextTrack(): void {
-  let attempts = 0;
-  const maxAttempts = state.playlist.length || 1;
+  // DrivePod "newest" autoplay strategy: the next track is the most recently
+  // published unplayed item. The queue is sorted publishedAt desc on every
+  // refresh, so that is the first entry that is either a not-yet-aired
+  // grabby item (never completed; excluded only until DrivePod reconditions
+  // it with a fresh clustered publishedAt) or a podcast that has not been
+  // completed.
+  const pickNext = (): number =>
+    state.playlist.findIndex(t =>
+      t.isGrabby === true ? !state.grabbyPlayed.has(t.id) : !state.completedTracks.has(t.id));
 
-  let nextIndex = state.currentTrackIndex + 1;
-  if (nextIndex >= state.playlist.length) {
-    nextIndex = 0;
-  }
-
-  while (
-    attempts < maxAttempts &&
-    state.playlist[nextIndex] &&
-    state.completedTracks.has(state.playlist[nextIndex].id)
-  ) {
-    nextIndex = (nextIndex + 1) % state.playlist.length;
-    attempts++;
-  }
-
-  if (attempts >= maxAttempts) {
+  let nextIndex = pickNext();
+  if (nextIndex === -1 && state.playlist.length > 0) {
+    // Full rotation: nothing unplayed remains (every podcast completed,
+    // every grabby item recently aired and not yet reconditioned) — clear
+    // both played sets and restart from the newest track.
     console.log('All tracks completed — resetting playlist');
-    const emptyCompleted = new Set<string>();
-    updateState({
-      currentTrackIndex: 0,
-      completedTracks: emptyCompleted,
-    });
+    updateState({ completedTracks: new Set<string>(), grabbyPlayed: new Map<string, string>() });
     saveCompletedTracks();
-    nextIndex = 0;
+    saveGrabbyPlayed();
+    nextIndex = pickNext();
   }
 
   updateState({
-    currentTrackIndex: nextIndex,
+    currentTrackIndex: nextIndex === -1 ? 0 : nextIndex,
     currentTrackStartTime: Date.now(),
   });
 
@@ -1082,9 +1397,7 @@ const server = http.createServer((req: http.IncomingMessage, res: http.ServerRes
     res.on('close', cleanup);
 
     if (!isPlaying && state.playlist.length > 0) {
-      startCurrentTrack().catch((err: Error) => {
-        console.error('startCurrentTrack error:', err.message);
-      });
+      advanceToNextTrack();
     }
     return;
   }
@@ -1125,18 +1438,12 @@ const server = http.createServer((req: http.IncomingMessage, res: http.ServerRes
     return;
   }
 
-  // Ops: skip to the next track (advances to the next playlist entry immediately).
+  // Ops: skip the current track (advances to the next track — the most recently published unplayed item).
   if (pathPart === '/api/skip' && params.get('pass') === '7dco2P1WQShV5lbqMuxu') {
-    if (isPlaying) {
-      // Force the current track to be marked complete (if it's a podcast) so
-      // advanceToNextTrack() does not loop through it.
-      const curId = currentTrackData?.id;
-      if (curId && currentTrackData?.isGrabby !== true) {
-        const newCompleted = new Set(state.completedTracks);
-        newCompleted.add(curId);
-        updateState({ completedTracks: newCompleted });
-        saveCompletedTracks();
-      }
+    if (isPlaying && currentTrackData) {
+      // Mark the current track as aired (completed podcast / recently played
+      // grabby) so advanceToNextTrack() does not re-pick it.
+      markTrackPlayed(currentTrackData);
     }
     advanceToNextTrack();
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1161,7 +1468,7 @@ const server = http.createServer((req: http.IncomingMessage, res: http.ServerRes
       thumbnailPath: t.thumbnailPath,
       channel: t.channel ? { title: t.channel.title } : null,
       source: t.source || 'main',
-      completed: state.completedTracks.has(t.id),
+      completed: state.completedTracks.has(t.id) || state.grabbyPlayed.has(t.id),
     }));
     const payload = {
       tracks,
@@ -1251,9 +1558,7 @@ server.listen(PORT, () => {
 
   setTimeout(() => {
     if (state.playlist.length > 0 && !isPlaying) {
-      startCurrentTrack().catch((err: Error) => {
-        console.error('startCurrentTrack error:', err.message);
-      });
+      advanceToNextTrack();
     }
   }, 500);
 

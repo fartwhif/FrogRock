@@ -63,6 +63,7 @@ The original implementation and README contained several deep misconceptions abo
 - **True broadcast radio** — all listeners synchronized
 - **Immutable global state** — safe, predictable, no race conditions
 - **Real-time pacing** — prevents clients from buffering hours of future content
+- **Newest-first rotation** — the queue is re-sorted by publish time (newest first) on every refresh, and the next track is the most recently published unplayed item (DrivePod's "newest" autoplay strategy)
 - **Completed track tracking** — automatically skips already-played episodes
 - **Automatic playlist refresh** every 5 minutes
 - **ICY/Shoutcast compatible headers**
@@ -203,6 +204,12 @@ function updateState(partial) {
 
 The server monitors bytes sent vs. elapsed time and automatically pauses/resumes the source stream to stay close to the target bitrate (default 128 kbps). This gives clients a healthy rolling buffer (~2 seconds) without allowing them to download the entire future playlist.
 
+### Track Ordering & Next-Track Selection
+
+- On every playlist refresh (startup + every 5 minutes), the queue is re-sorted newest-first by `publishedAt` (tiebreak: `videoId`), matching DrivePod's `index.json` ordering.
+- The next track is the most recently published unplayed item — DrivePod's **"newest"** autoplay strategy: the first queue entry that has not been completed. Grabby (music) items are never marked completed; once aired they join a recently-played set (persisted to `grabby-played.json`) and re-enter rotation when DrivePod reconditions them with a fresh clustered `publishedAt` — the grabby equivalent of DrivePod's watched-flag reset.
+- When the entire queue has been played (every podcast completed and every grabby item recently aired), both played sets are reset and playback restarts from the newest track.
+
 ### Completed Tracks
 
 - Tracks are marked completed only after they finish streaming to the broadcast.
@@ -217,6 +224,7 @@ The server monitors bytes sent vs. elapsed time and automatically pauses/resumes
 - `index.json` — DrivePod cache index (in `CACHE_DIR`) — full structure per `index.json.example`
 - `index.json.example` — complete example of real DrivePod index structure (14 fields + nested `channel`)
 - `completed.json` — persisted list of played track IDs (uses `id` field)
+- `grabby-played.json` — persisted map of recently aired grabby items (`id` → `publishedAt`); entries drop out on recondition
 - `serve.sh` — Linux startup script with automatic dependency installation, TypeScript compilation, `--force`, and `--rebuild` support
 
 - `tsconfig.json` + `package.json` — TypeScript configuration and npm scripts
