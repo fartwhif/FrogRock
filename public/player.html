@@ -853,8 +853,12 @@ function updatePlaylist() {
   // Match current track by ID (from status.json) — works with merged playlist
   const currentId = statusData?.currentTrack?.id;
 
-  // Read completed tracks from status.json
-  const completedSet = new Set(statusData?.completedTracks || []);
+  // Read played state from status.json: completed podcasts + recently aired
+  // grabby items (excluded from rotation until DrivePod reconditions them)
+  const completedSet = new Set([
+    ...(statusData?.completedTracks || []),
+    ...Object.keys(statusData?.grabbyPlayed || {}),
+  ]);
 
   let html = '';
   playlistData.forEach((track, i) => {
