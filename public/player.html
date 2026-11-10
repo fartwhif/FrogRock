@@ -726,21 +726,35 @@ function fmt(sec) {
   return `${m}:${String(s).padStart(2,'0')}`;
 }
 
+// ETag-based conditional polling: the server sends a strong ETag on each JSON
+// payload. Echoing it back via If-None-Match yields a bodyless 304 when the
+// payload is unchanged (the playlist only changes on the 5-minute refresh or
+// a track transition; the shoutcast verdict on the 60-second server poll),
+// so unchanged polls cost no transfer and no re-parse.
+const etagCache = {};
+async function fetchJsonEtag(relPath, key) {
+  const headers = etagCache[key] ? { 'If-None-Match': etagCache[key] } : {};
+  const r = await fetch(API_BASE + relPath, { headers });
+  if (r.status === 304) return null;   // unchanged — keep previous data
+  if (!r.ok) return null;
+  const etag = r.headers.get('ETag');
+  if (etag) etagCache[key] = etag;
+  return r.json();
+}
+
 // Fetch status from status.json
 async function fetchStatus() {
   try {
-    const r = await fetch(API_BASE + '/api/status.json');
-    if (!r.ok) return;
-    statusData = await r.json();
+    const data = await fetchJsonEtag('/api/status.json', 'status');
+    if (data) statusData = data;
   } catch(e) { /* ignore */ }
 }
 
 // Fetch playlist from /api/playlist
 async function fetchPlaylist() {
   try {
-    const r = await fetch(API_BASE + '/api/playlist');
-    if (!r.ok) return;
-    const data = await r.json();
+    const data = await fetchJsonEtag('/api/playlist', 'playlist');
+    if (!data) return;
     playlistData = data.tracks || [];
     // Use the playlist API's currentTrackIndex as fallback, but prefer ID matching
     playlistCurrentIdx = data.currentTrackIndex ?? -1;
@@ -1082,9 +1096,8 @@ let shoutcastData = null;
 
 async function fetchShoutcast() {
   try {
-    const r = await fetch(API_BASE + '/api/shoutcast');
-    if (!r.ok) return;
-    shoutcastData = await r.json();
+    const data = await fetchJsonEtag('/api/shoutcast', 'shoutcast');
+    if (data) shoutcastData = data;
   } catch (e) { /* ignore */ }
 }
 
