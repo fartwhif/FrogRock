@@ -11,6 +11,8 @@ import 'dotenv/config';
 import http from 'http';
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
+import zlib from 'zlib';
 import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import CodecParser, { CodecFrame, MPEGHeader } from 'codec-parser';
@@ -1341,6 +1343,51 @@ async function pollShoutcast(): Promise<void> {
   shoutcastStatus = result;
 }
 
+// ====================== JSON API RESPONSES (gzip + ETag) ======================
+// The web UI polls the JSON endpoints every 10 s. Keep that traffic cheap:
+// - Strong ETag (md5 of the body) + If-None-Match → 304 with no body when the
+//   payload is unchanged (the playlist only changes on the 5-minute refresh
+//   or a track transition; the shoutcast verdict on the 60-second server
+//   poll), so unchanged polls cost no transfer and no client re-parse.
+// - gzip when the client accepts it and the body is large enough to benefit.
+// `Cache-Control: no-cache` (not no-store) so browsers may revalidate via ETag.
+const GZIP_MIN_BYTES = 1024;
+
+function ifNoneMatches(req: http.IncomingMessage, etag: string): boolean {
+  const inm = req.headers['if-none-match'];
+  if (!inm) return false;
+  return inm.split(',').some(h => {
+    const v = h.trim().replace(/^W\//, '');
+    return v === '*' || v === etag;
+  });
+}
+
+/** Send a pre-serialized JSON body with ETag / 304 / gzip handling. */
+function sendJson(res: http.ServerResponse, req: http.IncomingMessage, json: string): void {
+  const body = Buffer.from(json, 'utf8');
+  const etag = '"' + crypto.createHash('md5').update(body).digest('hex') + '"';
+  const base: http.OutgoingHttpHeaders = {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-cache',
+    'ETag': etag,
+    'Vary': 'Accept-Encoding',
+    'Access-Control-Allow-Origin': '*',
+  };
+  if (ifNoneMatches(req, etag)) {
+    res.writeHead(304, base);
+    res.end();
+    return;
+  }
+  if (String(req.headers['accept-encoding'] || '').includes('gzip') && body.length >= GZIP_MIN_BYTES) {
+    const gz = zlib.gzipSync(body);
+    res.writeHead(200, { ...base, 'Content-Encoding': 'gzip', 'Content-Length': gz.length });
+    res.end(gz);
+  } else {
+    res.writeHead(200, base);
+    res.end(body);
+  }
+}
+
 // ====================== HTTP SERVER ======================
 const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   const url = req.url || '/';
@@ -1404,11 +1451,6 @@ const server = http.createServer((req: http.IncomingMessage, res: http.ServerRes
 
   // API: Status (live from memory)
   if (pathPart === '/api/status') {
-    res.writeHead(200, {
-      'Content-Type': 'application/json; charset=utf-8',
-      'Cache-Control': 'no-cache, no-store, must-revalidate',
-      'Access-Control-Allow-Origin': '*',
-    });
     const statusObj = {
       status: isPlaying ? 'playing' : 'idle',
       currentTrack: currentTrackData,
@@ -1423,14 +1465,14 @@ const server = http.createServer((req: http.IncomingMessage, res: http.ServerRes
       listeners: manifold.getActiveCount(),
       timestamp: new Date().toISOString(),
     };
-    res.end(JSON.stringify(statusObj));
+    sendJson(res, req, JSON.stringify(statusObj));
     return;
   }
 
   // API: Status file (on-disk status.json)
   if (pathPart === '/api/status.json') {
     if (fs.existsSync(STATUS_PATH)) {
-      serveStaticFile(res, STATUS_PATH, 'application/json; charset=utf-8');
+      sendJson(res, req, fs.readFileSync(STATUS_PATH, 'utf8'));
     } else {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end('{"status":"idle","currentTrack":null}');
@@ -1453,11 +1495,6 @@ const server = http.createServer((req: http.IncomingMessage, res: http.ServerRes
 
   // API: Playlist (filtered from index)
   if (pathPart === '/api/playlist') {
-    res.writeHead(200, {
-      'Content-Type': 'application/json; charset=utf-8',
-      'Cache-Control': 'no-cache, no-store, must-revalidate',
-      'Access-Control-Allow-Origin': '*',
-    });
     // Return playlist tracks with channel info + completed status
     const tracks = state.playlist.map(t => ({
       id: t.id,
@@ -1474,14 +1511,14 @@ const server = http.createServer((req: http.IncomingMessage, res: http.ServerRes
       tracks,
       currentTrackIndex: state.currentTrackIndex,
     };
-    res.end(JSON.stringify(payload));
+    sendJson(res, req, JSON.stringify(payload));
     return;
   }
 
   // API: Index file (on-disk index.json)
   if (pathPart === '/api/index.json') {
     if (fs.existsSync(INDEX_JSON_PATH)) {
-      serveStaticFile(res, INDEX_JSON_PATH, 'application/json; charset=utf-8');
+      sendJson(res, req, fs.readFileSync(INDEX_JSON_PATH, 'utf8'));
     } else {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end('[]');
@@ -1491,12 +1528,7 @@ const server = http.createServer((req: http.IncomingMessage, res: http.ServerRes
 
   // API: Shoutcast listing status (server-poll cache; drives the UI card)
   if (pathPart === '/api/shoutcast') {
-    res.writeHead(200, {
-      'Content-Type': 'application/json; charset=utf-8',
-      'Cache-Control': 'no-cache, no-store, must-revalidate',
-      'Access-Control-Allow-Origin': '*',
-    });
-    res.end(JSON.stringify(shoutcastStatus));
+    sendJson(res, req, JSON.stringify(shoutcastStatus));
     return;
   }
 
